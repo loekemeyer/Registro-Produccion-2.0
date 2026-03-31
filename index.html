@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Registro Produccion</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:,">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- LEGAJO -->
+  <div id="legajoScreen">
+    <button id="btnVolver" class="btn-volver">&#8592; Volver</button>
+    <h1>Ingresa tu numero de Operario</h1>
+    <input id="legajoInput" type="number" inputmode="numeric">
+    <button id="btnContinuar" class="primary-btn">Continuar</button>
+
+    <div class="history-wrap">
+      <div class="history-title">Resumen del dia (en este dispositivo)</div>
+      <div id="daySummary" class="history-empty">Ingresa tu legajo para ver el resumen</div>
+    </div>
+    <div id="pendingSection" class="pending-section hidden">
+      <div class="pending-title">Pendientes en cola (este dispositivo)</div>
+      <div id="pendingList" class="pending-list"></div>
+    </div>
+  </div>
+
+  <!-- OPCIONES -->
+  <div id="optionsScreen" class="hidden">
+    <div class="top-bar">
+      <div id="btnBackTop" class="back-top">&larr;</div>
+      <div id="btnBackLabel" class="back-label">Volver a pantalla inicial</div>
+    </div>
+
+    <div class="row row-2" id="row1"></div>
+    <div class="row row-5" id="row2"></div>
+    <div class="row row-5" id="row3"></div>
+    <div class="row row-4" id="row4"></div>
+
+    <div id="selectedArea" class="hidden">
+      <div class="selected-container">
+        <div id="btnResetSelection" class="back-arrow">&larr;</div>
+        <div id="selectedBox" class="selected-box"></div>
+        <div id="selectedDesc" class="selected-desc"></div>
+      </div>
+
+      <div id="inputArea" class="hidden">
+        <div id="inputLabel" class="label"></div>
+        <input id="textInput" class="text-input" autocomplete="off">
+      </div>
+
+      <div id="matrizInfo" class="matriz-info hidden"></div>
+
+      <button id="btnEnviar" class="primary-btn">Enviar</button>
+      <div id="error" class="error"></div>
+    </div>
+  </div>
+
+  <!-- MODAL EDICION -->
+  <div id="editModal" class="edit-modal hidden">
+    <div class="edit-modal-box">
+      <div class="edit-modal-header">Editar registro</div>
+      <div class="edit-modal-body">
+        <div class="edit-field">
+          <label>Codigo</label>
+          <select id="editCode"></select>
+        </div>
+        <div class="edit-field" id="editTextoWrap">
+          <label>Valor</label>
+          <input type="text" id="editTexto" />
+        </div>
+        <div class="edit-field">
+          <label>Evento</label>
+          <input type="text" id="editTs" disabled />
+        </div>
+        <div class="edit-field">
+          <label>Estado</label>
+          <input type="text" id="editStatus" disabled />
+        </div>
+      </div>
+      <div class="edit-modal-footer">
+        <button class="edit-btn edit-btn-cancel" id="editCancel">Cancelar</button>
+        <button class="edit-btn edit-btn-save" id="editSave">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,86 @@
+body{font-family:Arial,sans-serif;margin:0;padding:12px;}
+
+.btn-volver{
+  width:auto;
+  padding:8px 18px;
+  font-size:14px;
+  margin:0 0 8px;
+  border-radius:999px;
+  border:2px solid #ccc;
+  background:#f5f5f5;
+  color:#555;
+  cursor:pointer;
+}
+.btn-volver:hover{border-color:#888;}
+.hidden{display:none;}
+
+button{
+  width:100%;
+  padding:16px;
+  font-size:22px;
+  margin-top:14px;
+  border-radius:6px;
+}
+.primary-btn{background:#1e6bd6;color:#fff;border:none;}
+
+#legajoScreen h1{font-size:34px;text-align:center;}
+#legajoInput{width:100%;font-size:32px;padding:12px;text-align:center;}
+
+.row{display:grid;gap:10px;margin-top:12px;width:100%;box-sizing:border-box;}
+.row-2{grid-template-columns:repeat(2,1fr);}
+.row-3{grid-template-columns:repeat(3,1fr);}
+.row-4{grid-template-columns:repeat(4,1fr);}
+.row-5{grid-template-columns:repeat(5,1fr);}
+
+.box{box-sizing:border-box;border:2px solid #333;padding:12px 6px;text-align:center;cursor:pointer;}
+.box-title{font-size:20px;font-weight:bold;}
+.box-desc{font-size:11px;margin-top:4px;}
+
+.top-bar{display:flex;align-items:center;margin-bottom:6px;}
+.back-top{font-size:26px;cursor:pointer;}
+.back-label{font-size:14px;margin-left:8px;color:#444;cursor:pointer;}
+
+.selected-container{display:flex;align-items:center;justify-content:center;margin-top:16px;}
+.back-arrow{font-size:30px;cursor:pointer;margin-right:10px;}
+.selected-box{border:2px solid #333;padding:10px 22px;font-size:28px;font-weight:bold;color:#1e6bd6;}
+.selected-desc{margin-left:12px;font-size:18px;font-weight:bold;}
+
+.label{margin-top:14px;font-size:22px;text-align:center;}
+.text-input{width:100%;height:70px;font-size:64px;text-align:center;margin-top:8px;}
+.text-input::placeholder{font-size:26px;color:#aaa;}
+.error{color:red;margin-top:8px;font-size:18px;}
+
+.history-wrap{margin-top:14px;border:2px solid #ddd;border-radius:8px;padding:10px;background:#fafafa;}
+.history-title{font-size:16px;font-weight:bold;color:#333;margin-bottom:8px;}
+.history-empty{color:#777;font-size:14px;}
+.day-item{border:1px solid #e3e3e3;background:#fff;border-radius:8px;padding:10px;margin-top:8px;}
+.day-item .t1{font-weight:bold;font-size:14px;color:#1e6bd6;margin-bottom:4px;}
+.day-item .t2{font-size:13px;color:#333;}
+.hist-btn{cursor:pointer;font-size:20px;padding:2px 6px;border-radius:6px;user-select:none;}
+.hist-edit{color:#1e6bd6;}.hist-edit:hover{background:#eef4ff;}
+.hist-del{color:#b42318;}.hist-del:hover{background:#fef2f2;}
+
+/* Modal edicion */
+.edit-modal{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100;display:flex;align-items:center;justify-content:center;}
+.edit-modal.hidden{display:none;}
+.edit-modal-box{background:#fff;border-radius:16px;width:360px;max-width:92vw;box-shadow:0 12px 40px rgba(0,0,0,.2);overflow:hidden;}
+.edit-modal-header{background:#111;color:#fff;padding:14px 18px;font-weight:700;font-size:16px;}
+.edit-modal-body{padding:18px;display:flex;flex-direction:column;gap:14px;}
+.edit-field{display:flex;flex-direction:column;gap:4px;}
+.edit-field label{font-size:12px;font-weight:700;color:#444;}
+.edit-field input,.edit-field select{height:40px;border:1px solid #c9d1d9;border-radius:10px;padding:0 12px;font-size:16px;outline:none;background:#fff;}
+.edit-field input:disabled{background:#f3f4f6;color:#888;}
+.edit-field input:focus,.edit-field select:focus{border-color:#4b89ff;}
+.edit-modal-footer{display:flex;justify-content:flex-end;gap:8px;padding:14px 18px;border-top:1px solid #e3e6eb;}
+.edit-btn{border:none;border-radius:10px;padding:10px 20px;font-weight:700;font-size:14px;cursor:pointer;}
+.edit-btn-cancel{background:#f3f4f6;color:#333;}.edit-btn-cancel:hover{background:#e5e7eb;}
+.edit-btn-save{background:#111;color:#fff;}.edit-btn-save:hover{opacity:.85;}
+
+.matriz-info{margin-top:12px;padding:10px;border:2px dashed #1e6bd6;border-radius:10px;background:#eef4ff;font-size:18px;font-weight:bold;text-align:center;}
+.matriz-info small{display:block;margin-top:4px;font-size:13px;font-weight:normal;color:#444;}
+
+.box.selected{border-color:#1aa34a !important;background:#eafff1;box-shadow:0 0 0 2px rgba(26,163,74,.25);}
+.box.selected .box-title{color:#1aa34a;}
+
+.pending-section{margin-top:14px;border:2px solid #ffe0b2;border-radius:8px;padding:10px;background:#fff8e1;}
+.pending-title{font-size:16px;font-weight:bold;color:#8a5a00;margin-bottom:8px;}
