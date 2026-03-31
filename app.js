@@ -1168,24 +1168,6 @@ document.addEventListener("DOMContentLoaded", () => {
     finally { btnEnviar.disabled = false; btnEnviar.innerText = "Enviar"; }
   }
 
-  /* ================= VOLVER CON CLAVE ================= */
-  const btnVolver = $("btnVolver");
-  btnVolver.addEventListener("click", async () => {
-    const clave = prompt("Ingresa la clave para volver:");
-    if (clave === null) return;
-    if (!clave.trim()) { alert("Ingresa una clave"); return; }
-    try {
-      const { data, error } = await sb.from("app_login").select("id").eq("password_text", clave.trim()).single();
-      if (error || !data) {
-        alert("Clave incorrecta");
-      } else {
-        window.location.href = "../Inicio/index.html";
-      }
-    } catch {
-      alert("Error de conexion. Intenta de nuevo.");
-    }
-  });
-
   /* ================= EVENTOS ================= */
   btnContinuar.addEventListener("click", goToOptions);
   btnBackTop.addEventListener("click", backToLegajo);
