@@ -1167,18 +1167,6 @@ document.addEventListener("DOMContentLoaded", () => {
     try { await flushQueue(); }
     finally { btnEnviar.disabled = false; btnEnviar.innerText = "Enviar"; }
   }
-
-  /* ================= VOLVER CON CLAVE ================= */
-  const btnVolver = $("btnVolver");
-  btnVolver.addEventListener("click", () => {
-    const clave = prompt("Ingresa la clave para volver:");
-    if (clave === "1515") {
-      window.location.href = "../Inicio/index.html";
-    } else if (clave !== null) {
-      alert("Clave incorrecta");
-    }
-  });
-
   /* ================= EVENTOS ================= */
   btnContinuar.addEventListener("click", goToOptions);
   btnBackTop.addEventListener("click", backToLegajo);
