@@ -300,13 +300,16 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function buscarTiemposMuertos(legajo, hsInicio, horaFin, fecha) {
-    // Buscar registros de TM en db_n8n_espejo entre hs_inicio y hora_fin para ese legajo y fecha
     const dateInfo = dateFromISO(fecha);
     if (!dateInfo.dia || !dateInfo.mes) return 0;
 
+    const hiTime = timeFromISO(hsInicio);
+    const hfTime = timeFromISO(horaFin);
+    if (!hiTime || !hfTime) return 0;
+
     try {
       const { data } = await sb.from("db_n8n_espejo")
-        .select("Segundos_Tiempo_Muerto")
+        .select("Segundos_Tiempo_Muerto, Hora_Inicio, Hora_Fin")
         .eq("Legajo", legajo)
         .eq("Dia", dateInfo.dia)
         .eq("Mes", dateInfo.mes)
@@ -314,7 +317,12 @@ document.addEventListener("DOMContentLoaded", () => {
         .is("Eliminar", null);
 
       if (!data || !data.length) return 0;
-      return data.reduce((acc, r) => acc + Number(r.Segundos_Tiempo_Muerto || 0), 0);
+      return data.reduce((acc, r) => {
+        if (r.Hora_Inicio >= hiTime && r.Hora_Fin <= hfTime) {
+          return acc + Number(r.Segundos_Tiempo_Muerto || 0);
+        }
+        return acc;
+      }, 0);
     } catch { return 0; }
   }
 
@@ -466,6 +474,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const { error } = await sb.from("db_n8n_espejo").insert(row);
       if (error) console.error("Error insertando en db_n8n_espejo:", error);
+      // Recalcular cajones del dia si se inserto un TM
+      if (esTM && dateInfo.dia && dateInfo.mes) {
+        await recalcularCajonesDelDia(legajo, dateInfo.dia, dateInfo.mes);
+      }
     } catch (err) {
       console.error("Error procesando para espejo:", err);
     }
