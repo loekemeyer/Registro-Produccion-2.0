@@ -656,21 +656,36 @@ document.addEventListener("DOMContentLoaded", () => {
     const item = s.last2[idx];
     if (!item) return;
 
-    // Guardar datos del item ANTES de eliminarlo
-    const eraUnTM = item.hs_inicio && isDowntime(String(item.opcion || "").toUpperCase());
+    // Guardar datos del item ANTES de eliminarlo (FIX Bug7: hsInicio, no hs_inicio)
+    const opUpper = String(item.opcion || "").toUpperCase();
+    const eraUnTM = item.hsInicio && isDowntime(opUpper);
     const tsParaDia = item.ts_event || item.ts;
 
-    // Eliminar de Supabase
+    // Eliminar de Supabase (FIX Bug1: hashId)
     try {
       if (item.id) {
         await sb.from(TABLA_REGISTROS).delete().eq("id", item.id);
         // También eliminar de db_n8n_espejo si existe
-        await sb.from("db_n8n_espejo").delete().eq("ID_Ejecucion", item.id);
+        await sb.from("db_n8n_espejo").delete().eq("ID_Ejecucion", hashId(item.id));
       }
     } catch (err) { console.error("Error eliminando de Supabase:", err); }
 
     // Eliminar de localStorage
     s.last2.splice(idx, 1);
+
+    // FIX Bug3: Si se eliminó un E, limpiar lastMatrix
+    if (opUpper === "E") {
+      if (s.lastMatrix && s.lastMatrix.texto === (item.texto || "")) {
+        s.lastMatrix = null;
+        s.matrixNeedsC = false;
+      }
+    // FIX Bug4: Si se eliminó un C, revertir matrixNeedsC
+    } else if (opUpper === "C") {
+      s.matrixNeedsC = true;
+      const prevCajon = s.last2.find(x => String(x.opcion || "").toUpperCase() === "C");
+      s.lastCajon = prevCajon ? { opcion: prevCajon.opcion, texto: prevCajon.texto || "", ts: prevCajon.ts } : null;
+    }
+
     writeState(leg, s);
 
     // Eliminar de cola si estaba pendiente
@@ -747,9 +762,22 @@ document.addEventListener("DOMContentLoaded", () => {
           texto: texto
         }).eq("id", item.id);
 
-        // Recalcular db_n8n_espejo si es cajon (C) con cantidad
+        // FIX Bug5+6: Sincronizar db_n8n_espejo segun nuevo tipo
         const idEjec = hashId(item.id);
         if (idEjec) {
+          const toSec = (hms) => {
+            if (!hms) return 0;
+            const [h, m, s] = hms.split(":").map(Number);
+            return h * 3600 + m * 60 + (s || 0);
+          };
+
+          // Buscar registro existente en espejo
+          const { data: existente } = await sb.from("db_n8n_espejo")
+            .select("*")
+            .eq("ID_Ejecucion", idEjec).limit(1);
+          const filaExiste = existente && existente.length > 0;
+          const fila = filaExiste ? existente[0] : null;
+
           if (code === "C" && texto) {
             const uni = Number(texto) || 0;
             const matNum = String(item.matriz || "").trim();
@@ -757,64 +785,114 @@ document.addEventListener("DOMContentLoaded", () => {
             const tProm = Number(matInfo?.Tiempo_Promedio || 0);
             const segHist = tProm * uni;
 
-            // Buscar registro existente en espejo — recalcula tiempo neto desde cero
-            const { data: existente } = await sb.from("db_n8n_espejo")
-              .select("Segundos_Trabajados, Hora_Inicio, Hora_Fin, Dia, Mes")
-              .eq("ID_Ejecucion", idEjec).limit(1);
-            if (existente && existente.length > 0) {
-              const fila = existente[0];
+            // Calcular tiempos usando fila existente o datos del item
+            const horaInicio = fila?.Hora_Inicio || timeFromISO(item.hsInicio || item.ts);
+            const horaFin = fila?.Hora_Fin || timeFromISO(item.ts);
+            const dia = fila?.Dia || dateFromISO(item.ts).dia;
+            const mes = fila?.Mes || dateFromISO(item.ts).mes;
 
-              const toSec = (hms) => {
-                if (!hms) return 0;
-                const [h, m, s] = hms.split(":").map(Number);
-                return h * 3600 + m * 60 + (s || 0);
-              };
-              const segBruto = Math.max(1, toSec(fila.Hora_Fin) - toSec(fila.Hora_Inicio));
+            const segBruto = Math.max(1, toSec(horaFin) - toSec(horaInicio));
 
-              // Buscar TMs actuales en el rango del cajon
-              const { data: tms } = await sb.from("db_n8n_espejo")
-                .select("Hora_Inicio, Hora_Fin, Segundos_Tiempo_Muerto")
-                .eq("Legajo", item.legajo)
-                .eq("Dia", fila.Dia)
-                .eq("Mes", fila.Mes)
-                .eq("Uni", 0)
-                .is("Eliminar", null);
+            // Buscar TMs actuales en el rango del cajon
+            const { data: tms } = await sb.from("db_n8n_espejo")
+              .select("Hora_Inicio, Hora_Fin, Segundos_Tiempo_Muerto")
+              .eq("Legajo", item.legajo)
+              .eq("Dia", dia)
+              .eq("Mes", mes)
+              .eq("Uni", 0)
+              .is("Eliminar", null);
 
-              const segTM = (tms || []).reduce((acc, tm) => {
-                if (!tm.Hora_Inicio || !tm.Hora_Fin) return acc;
-                if (tm.Hora_Inicio >= fila.Hora_Inicio && tm.Hora_Fin <= fila.Hora_Fin) {
-                  return acc + Number(tm.Segundos_Tiempo_Muerto || 0);
-                }
-                return acc;
-              }, 0);
+            const segTM = (tms || []).reduce((acc, tm) => {
+              if (!tm.Hora_Inicio || !tm.Hora_Fin) return acc;
+              if (tm.Hora_Inicio >= horaInicio && tm.Hora_Fin <= horaFin) {
+                return acc + Number(tm.Segundos_Tiempo_Muerto || 0);
+              }
+              return acc;
+            }, 0);
 
-              const segNeto = Math.max(1, segBruto - segTM);
-              const premio = segHist > 0 ? Math.round(((-(segNeto / segHist) + 1) * 10) * 100) / 100 : 0;
+            const segNeto = Math.max(1, segBruto - segTM);
+            const premio = segHist > 0 ? Math.round(((-(segNeto / segHist) + 1) * 10) * 100) / 100 : 0;
 
-              await sb.from("db_n8n_espejo").update({
-                Uni: uni,
-                Matriz: matNum,
-                Nombre_Matriz: matInfo?.Matriz || "",
-                Segundos_Historico: segHist,
-                Segundos_Trabajados: segNeto,
-                Segundos_Tiempo_Muerto: segTM,
-                Premio: premio,
-                Tiempo_Historico: tProm,
-                Tiempo_Toma: uni > 0 ? Math.round((segNeto / uni) * 100) / 100 : 0
-              }).eq("ID_Ejecucion", idEjec);
+            const cajonData = {
+              Uni: uni,
+              Matriz: matNum,
+              Nombre_Matriz: matInfo?.Matriz || "",
+              Segundos_Historico: segHist,
+              Segundos_Trabajados: segNeto,
+              Segundos_Tiempo_Muerto: segTM,
+              Premio: premio,
+              Tiempo_Historico: tProm,
+              Tiempo_Toma: uni > 0 ? Math.round((segNeto / uni) * 100) / 100 : 0
+            };
+
+            if (filaExiste) {
+              await sb.from("db_n8n_espejo").update(cajonData).eq("ID_Ejecucion", idEjec);
+            } else {
+              // FIX Bug5: No existía en espejo (era TM u otro tipo) → insertar como cajón
+              const emp = empleadosMap.get(String(item.legajo || "").trim());
+              await sb.from("db_n8n_espejo").insert({
+                ...cajonData,
+                ID_Ejecucion: idEjec,
+                Fecha: item.ts,
+                Legajo: item.legajo,
+                Nombre_Empleado: emp?.Empleado || "",
+                Hora_Inicio: horaInicio,
+                Hora_Fin: horaFin,
+                Dia: dia,
+                Mes: mes,
+                Quincena: dia > 15 ? 2 : 1,
+                Anular_Tiempo: false
+              });
             }
-          } else if (code !== "C") {
-            // Si cambió de C a otra cosa, eliminar del espejo el registro de cajon
+          } else if (isDowntime(code) && item.hsInicio) {
+            // FIX Bug6: Editaron a un TM → actualizar o insertar en espejo
+            const horaInicio = timeFromISO(item.hsInicio || item.ts);
+            const horaFin = timeFromISO(item.ts);
+            const segTrabajados = Math.max(1, toSec(horaFin) - toSec(horaInicio));
+            const dateInfo = dateFromISO(item.ts);
+
+            const tmData = {
+              Matriz: code,
+              Nombre_Matriz: opt.desc,
+              Uni: 0,
+              Premio: 0,
+              Tiempo_Toma: 0,
+              Tiempo_Historico: 0,
+              Segundos_Historico: 0,
+              Segundos_Trabajados: segTrabajados,
+              Segundos_Tiempo_Muerto: segTrabajados
+            };
+
+            if (filaExiste) {
+              await sb.from("db_n8n_espejo").update(tmData).eq("ID_Ejecucion", idEjec);
+            } else {
+              const emp = empleadosMap.get(String(item.legajo || "").trim());
+              await sb.from("db_n8n_espejo").insert({
+                ...tmData,
+                ID_Ejecucion: idEjec,
+                Fecha: item.ts,
+                Legajo: item.legajo,
+                Nombre_Empleado: emp?.Empleado || "",
+                Hora_Inicio: horaInicio,
+                Hora_Fin: horaFin,
+                Dia: dateInfo.dia,
+                Mes: dateInfo.mes,
+                Quincena: dateInfo.dia > 15 ? 2 : 1,
+                Anular_Tiempo: false
+              });
+            }
+          } else if (filaExiste) {
+            // Cambió a algo que no va al espejo (E, etc) → eliminar
             await sb.from("db_n8n_espejo").delete().eq("ID_Ejecucion", idEjec);
           }
         }
       }
     } catch (err) { console.error("Error actualizando Supabase:", err); }
 
-    // Si el item editado era o pasó a ser un TM, recalcular cajones del dia
+    // Si el item editado era o pasó a ser un TM, recalcular cajones del dia (FIX Bug7: hsInicio)
     const opAnterior = String(s.last2[editingIdx]?.opcion || item.opcion || "").toUpperCase();
-    const eraOesTM = (isDowntime(opAnterior) && item.hs_inicio) ||
-                     (isDowntime(code) && item.hs_inicio);
+    const eraOesTM = (isDowntime(opAnterior) && item.hsInicio) ||
+                     (isDowntime(code) && item.hsInicio);
     if (eraOesTM) {
       const tsParaDia = item.ts_event || item.ts;
       if (tsParaDia) {
@@ -823,6 +901,14 @@ document.addEventListener("DOMContentLoaded", () => {
           await recalcularCajonesDelDia(editingLeg, dateInfo.dia, dateInfo.mes);
         }
       }
+    }
+
+    // FIX Bug2: Si se editó a "E" (Empecé Matriz), actualizar estado del operario
+    if (code === "E" && texto) {
+      const st = readState(editingLeg);
+      st.lastMatrix = { opcion: "E", texto: texto, ts: item.ts || item.ts_event };
+      st.matrixNeedsC = true;
+      writeState(editingLeg, st);
     }
 
     // Actualizar cola
@@ -1039,7 +1125,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     maybeSendLateArrival(legajo);
 
-    const texto = String(textInput.value || "").trim();
+    let texto = String(textInput.value || "").trim();
     const stateBefore = readState(legajo);
 
     // Validacion input
