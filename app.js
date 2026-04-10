@@ -9,14 +9,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
   /* ================= WHATSAPP ALERTA ================= */
-  // Credenciales seguras en Edge Function (servidor), NO en el frontend
   const EDGE_FN_URL = SUPABASE_URL + "/functions/v1/send-whatsapp";
 
   function _getPlantillaActiva() {
     return localStorage.getItem("wa_plantilla_activa") || "problemas_en_matriz_reducido";
   }
 
-  // datos = { problema, matriz, descripcion, operario, horaEvento }
   async function enviarAlertaWA(datos) {
     const plantilla = _getPlantillaActiva();
     let parametros;
@@ -57,8 +55,10 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= CACHE EMPLEADOS/MATRICES ================= */
-  let empleadosMap = new Map(); // legajo → { Empleado, Sede, ... }
-  let matricesMap = new Map();  // N_Matriz → { Matriz, Tiempo_Promedio, ... }
+  let empleadosMap = new Map();
+  let matricesMap = new Map();
+  let _nombreMatrizOverride = null;
+  let _varianteYaElegida = false;
 
   async function cargarCatalogos() {
     const [empRes, matRes] = await Promise.all([
@@ -120,7 +120,6 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function hashId(uuid) {
-    // Convierte UUID a un número entero para ID_Ejecucion (bigint)
     if (!uuid) return null;
     const hex = String(uuid).replace(/-/g, "").slice(0, 15);
     return parseInt(hex, 16) || null;
@@ -189,7 +188,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const today = dayKeyAR();
   const lastDay = localStorage.getItem(DAY_GUARD_KEY);
   if (lastDay && lastDay !== today) {
-    // Limpiar estados de dias anteriores, migrar pendientes
     for (let i = localStorage.length - 1; i >= 0; i--) {
       const k = localStorage.key(i);
       if (!k || !k.startsWith(LS_PREFIX + "::")) continue;
@@ -241,7 +239,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const { error } = await sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id" });
     if (error) throw new Error(error.message);
 
-    // Procesar y escribir en db_n8n_espejo (replica lógica n8n)
     await procesarParaEspejo(item);
   }
 
@@ -249,18 +246,15 @@ document.addEventListener("DOMContentLoaded", () => {
   function parseISOtoAR(iso) {
     if (!iso) return null;
     try {
-      // Normalizar formato: reemplazar espacios antes de hora con T
       let normalized = String(iso).trim().replace(/\s(\d{2}:\d{2})/, "T$1");
       return new Date(normalized);
     } catch { return null; }
   }
 
   function diffSeconds(isoStart, isoEnd) {
-    // Normalizar formatos de fecha
     const normalize = (s) => {
       if (!s) return null;
       try {
-        // Convertir espacios a T si es necesario
         s = String(s).trim().replace(/\s(\d{2}:\d{2})/, "T$1");
         return new Date(s);
       } catch (e) {
@@ -274,7 +268,6 @@ document.addEventListener("DOMContentLoaded", () => {
       console.warn("DEBUG diffSeconds: No se pudo parsear", { isoStart, isoEnd, a, b });
       return 0;
     }
-    // Usar valor absoluto para evitar negativos por diferencias de zona horaria
     const diff = Math.abs(Math.round((b - a) / 1000));
     return diff;
   }
@@ -394,7 +387,6 @@ document.addEventListener("DOMContentLoaded", () => {
       const emp = empleadosMap.get(legajo);
       const nombreEmpleado = emp?.Empleado || "";
 
-      // Solo procesar C (cajón) y TM (tiempos muertos con hs_inicio)
       const esCajon = op === "C";
       const esTM = !esCajon && item.hs_inicio && isDowntime(op);
       const esRM_PM_RD_LT = ["RM", "PM", "RD", "LT"].includes(op);
@@ -406,17 +398,16 @@ document.addEventListener("DOMContentLoaded", () => {
       const nombreMatriz = matInfo?.Matriz || "";
       const tiempoPromedio = Number(matInfo?.Tiempo_Promedio || 0);
 
-      const uni = esCajon ? Number(item.texto || 0) : 0;
+      // FIX Bug 501: reemplazar coma por punto antes de Number()
+      const uni = esCajon ? Number(String(item.texto || 0).replace(",", ".")) : 0;
       const tsEvent = item.ts_event;
       let hsInicio = item.hs_inicio || tsEvent;
 
-      // Si hsInicio está vacío, establecer un mínimo de 1 segundo de trabajo
       if (!item.hs_inicio) {
-        console.warn("DEBUG: hsInicio vacío para matriz", matNum, "usando tsEvent");
+        console.warn("DEBUG: hsInicio vacio para matriz", matNum, "usando tsEvent");
       }
 
       let segTrabajados = diffSeconds(hsInicio, tsEvent);
-      // Asegurar que sea positivo y mínimo 1 segundo
       if (segTrabajados <= 0) segTrabajados = 1;
       const dateInfo = dateFromISO(tsEvent);
       const horaInicio = timeFromISO(hsInicio);
@@ -429,7 +420,6 @@ document.addEventListener("DOMContentLoaded", () => {
       let anularTiempo = false;
 
       if (esCajon) {
-        // Buscar TM acumulados en el rango
         segTiempoMuerto = await buscarTiemposMuertos(legajo, hsInicio, tsEvent, tsEvent);
         segTrabajadosNeto = segTrabajados - segTiempoMuerto;
 
@@ -438,21 +428,18 @@ document.addEventListener("DOMContentLoaded", () => {
           premio = Math.round(((-(segTrabajadosNeto / uni / tiempoPromedio) + 1) * 10) * 100) / 100;
         }
       } else if (esTM) {
-        // Tiempo muerto: Uni=0, segundos = duración del TM
         segTiempoMuerto = segTrabajados;
         segTrabajadosNeto = segTrabajados;
         anularTiempo = false;
       } else if (esRM_PM_RD_LT) {
-        // Rotura/Paré Matriz: registrar como evento, Uni=0
         anularTiempo = false;
       }
-
-      // Nota: Las matrices sin Tiempo_Promedio se muestran en informes sin premio
 
       const row = {
         Fecha: tsEvent,
         Legajo: legajo,
-        Nombre_Matriz: esCajon ? nombreMatriz : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion),
+        // nombreOverride para variantes (ej: Mat 10 recta/curva)
+        Nombre_Matriz: esCajon ? (item.nombreOverride || nombreMatriz) : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion),
         Matriz: esCajon ? matNum : (esRM_PM_RD_LT ? matNum : op),
         Uni: uni,
         Premio: premio,
@@ -474,7 +461,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const { error } = await sb.from("db_n8n_espejo").insert(row);
       if (error) console.error("Error insertando en db_n8n_espejo:", error);
-      // Recalcular cajones del dia si se inserto un TM
       if (esTM && dateInfo.dia && dateInfo.mes) {
         await recalcularCajonesDelDia(legajo, dateInfo.dia, dateInfo.mes);
       }
@@ -558,7 +544,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const btn = document.createElement("button");
         btn.textContent = op.label;
         btn.style.cssText = "display:block;width:100%;padding:14px;margin-bottom:10px;border:1px solid #c9d1d9;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;background:#f8f9fa";
-        btn.onclick = () => { overlay.remove(); resolve(op.matriz); };
+        // FIX: resolve el objeto completo, no solo op.matriz
+        btn.onclick = () => { overlay.remove(); resolve(op); };
         modal.appendChild(btn);
       });
 
@@ -640,7 +627,6 @@ document.addEventListener("DOMContentLoaded", () => {
         </div>
       </div>`;
 
-    // Listeners editar/eliminar
     daySummary.querySelectorAll(".hist-edit").forEach(btn => {
       btn.addEventListener("click", () => editHistItem(leg, parseInt(btn.dataset.idx)));
     });
@@ -656,30 +642,37 @@ document.addEventListener("DOMContentLoaded", () => {
     const item = s.last2[idx];
     if (!item) return;
 
-    // Guardar datos del item ANTES de eliminarlo (FIX Bug7: hsInicio, no hs_inicio)
     const opUpper = String(item.opcion || "").toUpperCase();
     const eraUnTM = item.hsInicio && isDowntime(opUpper);
     const tsParaDia = item.ts_event || item.ts;
 
-    // Eliminar de Supabase (FIX Bug1: hashId)
+    // Auditoria: registrar eliminacion
+    try {
+      await sb.from("Auditoria_Produccion").insert({
+        legajo:          String(leg),
+        accion:          "ELIMINAR",
+        id_registro:     item.id ? String(item.id) : null,
+        opcion_original: item.opcion || null,
+        desc_original:   item.descripcion || null,
+        texto_original:  item.texto || null,
+        ts_evento:       item.ts_event || item.ts || null
+      });
+    } catch (err) { console.error("Error auditoria eliminar:", err); }
+
     try {
       if (item.id) {
         await sb.from(TABLA_REGISTROS).delete().eq("id", item.id);
-        // También eliminar de db_n8n_espejo si existe
         await sb.from("db_n8n_espejo").delete().eq("ID_Ejecucion", hashId(item.id));
       }
     } catch (err) { console.error("Error eliminando de Supabase:", err); }
 
-    // Eliminar de localStorage
     s.last2.splice(idx, 1);
 
-    // FIX Bug3: Si se eliminó un E, limpiar lastMatrix
     if (opUpper === "E") {
       if (s.lastMatrix && s.lastMatrix.texto === (item.texto || "")) {
         s.lastMatrix = null;
         s.matrixNeedsC = false;
       }
-    // FIX Bug4: Si se eliminó un C, revertir matrixNeedsC
     } else if (opUpper === "C") {
       s.matrixNeedsC = true;
       const prevCajon = s.last2.find(x => String(x.opcion || "").toUpperCase() === "C");
@@ -688,11 +681,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     writeState(leg, s);
 
-    // Eliminar de cola si estaba pendiente
     const q = readQueue().filter(x => x.id !== item.id);
     writeQueue(q);
 
-    // Si era un TM, recalcular cajones del mismo dia
     if (eraUnTM && tsParaDia) {
       const dateInfo = dateFromISO(tsParaDia);
       if (dateInfo.dia && dateInfo.mes) {
@@ -717,7 +708,6 @@ document.addEventListener("DOMContentLoaded", () => {
   let editingLeg = null;
   let editingIdx = null;
 
-  // Poblar select con opciones
   OPTIONS.forEach(o => {
     const opt = document.createElement("option");
     opt.value = o.code;
@@ -747,13 +737,30 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!opt) return;
     const texto = opt.input?.show ? editTextoEl.value.trim() : "";
 
-    // Actualizar localStorage
+    // Auditoria: registrar edicion
+    const huboCambio = item.opcion !== code || item.texto !== texto;
+    if (huboCambio) {
+      try {
+        await sb.from("Auditoria_Produccion").insert({
+          legajo:          String(editingLeg),
+          accion:          "EDITAR",
+          id_registro:     item.id ? String(item.id) : null,
+          opcion_original: item.opcion || null,
+          desc_original:   item.descripcion || null,
+          texto_original:  item.texto || null,
+          ts_evento:       item.ts_event || item.ts || null,
+          opcion_nueva:    code,
+          desc_nueva:      opt.desc,
+          texto_nuevo:     texto || null
+        });
+      } catch (err) { console.error("Error auditoria editar:", err); }
+    }
+
     item.opcion = code;
     item.descripcion = opt.desc;
     item.texto = texto;
     writeState(editingLeg, s);
 
-    // Actualizar Supabase - tabla registros
     try {
       if (item.id) {
         await sb.from(TABLA_REGISTROS).update({
@@ -762,7 +769,6 @@ document.addEventListener("DOMContentLoaded", () => {
           texto: texto
         }).eq("id", item.id);
 
-        // FIX Bug5+6: Sincronizar db_n8n_espejo segun nuevo tipo
         const idEjec = hashId(item.id);
         if (idEjec) {
           const toSec = (hms) => {
@@ -771,7 +777,6 @@ document.addEventListener("DOMContentLoaded", () => {
             return h * 3600 + m * 60 + (s || 0);
           };
 
-          // Buscar registro existente en espejo
           const { data: existente } = await sb.from("db_n8n_espejo")
             .select("*")
             .eq("ID_Ejecucion", idEjec).limit(1);
@@ -779,13 +784,12 @@ document.addEventListener("DOMContentLoaded", () => {
           const fila = filaExiste ? existente[0] : null;
 
           if (code === "C" && texto) {
-            const uni = Number(texto) || 0;
+            const uni = Number(String(texto).replace(",", ".")) || 0;
             const matNum = String(item.matriz || "").trim();
             const matInfo = matricesMap.get(matNum);
             const tProm = Number(matInfo?.Tiempo_Promedio || 0);
             const segHist = tProm * uni;
 
-            // Calcular tiempos usando fila existente o datos del item
             const horaInicio = fila?.Hora_Inicio || timeFromISO(item.hsInicio || item.ts);
             const horaFin = fila?.Hora_Fin || timeFromISO(item.ts);
             const dia = fila?.Dia || dateFromISO(item.ts).dia;
@@ -793,7 +797,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
             const segBruto = Math.max(1, toSec(horaFin) - toSec(horaInicio));
 
-            // Buscar TMs actuales en el rango del cajon
             const { data: tms } = await sb.from("db_n8n_espejo")
               .select("Hora_Inicio, Hora_Fin, Segundos_Tiempo_Muerto")
               .eq("Legajo", item.legajo)
@@ -828,7 +831,6 @@ document.addEventListener("DOMContentLoaded", () => {
             if (filaExiste) {
               await sb.from("db_n8n_espejo").update(cajonData).eq("ID_Ejecucion", idEjec);
             } else {
-              // FIX Bug5: No existía en espejo (era TM u otro tipo) → insertar como cajón
               const emp = empleadosMap.get(String(item.legajo || "").trim());
               await sb.from("db_n8n_espejo").insert({
                 ...cajonData,
@@ -845,7 +847,6 @@ document.addEventListener("DOMContentLoaded", () => {
               });
             }
           } else if (isDowntime(code) && item.hsInicio) {
-            // FIX Bug6: Editaron a un TM → actualizar o insertar en espejo
             const horaInicio = timeFromISO(item.hsInicio || item.ts);
             const horaFin = timeFromISO(item.ts);
             const segTrabajados = Math.max(1, toSec(horaFin) - toSec(horaInicio));
@@ -882,14 +883,12 @@ document.addEventListener("DOMContentLoaded", () => {
               });
             }
           } else if (filaExiste) {
-            // Cambió a algo que no va al espejo (E, etc) → eliminar
             await sb.from("db_n8n_espejo").delete().eq("ID_Ejecucion", idEjec);
           }
         }
       }
     } catch (err) { console.error("Error actualizando Supabase:", err); }
 
-    // Si el item editado era o pasó a ser un TM, recalcular cajones del dia (FIX Bug7: hsInicio)
     const opAnterior = String(s.last2[editingIdx]?.opcion || item.opcion || "").toUpperCase();
     const eraOesTM = (isDowntime(opAnterior) && item.hsInicio) ||
                      (isDowntime(code) && item.hsInicio);
@@ -903,7 +902,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // FIX Bug2: Si se editó a "E" (Empecé Matriz), actualizar estado del operario
     if (code === "E" && texto) {
       const st = readState(editingLeg);
       st.lastMatrix = { opcion: "E", texto: texto, ts: item.ts || item.ts_event };
@@ -911,7 +909,6 @@ document.addEventListener("DOMContentLoaded", () => {
       writeState(editingLeg, st);
     }
 
-    // Actualizar cola
     const q = readQueue();
     const qItem = q.find(x => x.id === item.id);
     if (qItem) {
@@ -964,7 +961,8 @@ document.addEventListener("DOMContentLoaded", () => {
       matrizInfo.innerHTML = 'No hay matriz registrada hoy.<br><small>Envia primero "E (Empece Matriz)"</small>';
       return;
     }
-    matrizInfo.innerHTML = `Matriz en uso: <span style="font-size:22px;">${s.lastMatrix.texto}</span>
+    const varianteLabel = s.lastMatrix.nombreOverride ? `<br><small style="color:#1e6bd6;font-weight:700;">${s.lastMatrix.nombreOverride}</small>` : "";
+    matrizInfo.innerHTML = `Matriz en uso: <span style="font-size:22px;">${s.lastMatrix.texto}</span>${varianteLabel}
       <small>Ultima matriz: ${s.lastMatrix.ts ? formatDateTimeAR(s.lastMatrix.ts) : ""}</small>`;
   }
 
@@ -1005,7 +1003,6 @@ document.addEventListener("DOMContentLoaded", () => {
     const leg = legajoKey();
     if (!leg) { alert("Ingresa el numero de legajo"); return; }
 
-    // Validar legajo contra Supabase
     if (!empleadosMap.has(leg)) {
       alert("Legajo no encontrado. Verifica el numero.");
       return;
@@ -1060,7 +1057,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function computeHsInicio(state) {
     if (state.lastCajon?.ts) return state.lastCajon.ts;
     if (state.lastMatrix?.ts) return state.lastMatrix.ts;
-    console.log("DEBUG: No se encontró hs_inicio en state", state);
+    console.log("DEBUG: No se encontro hs_inicio en state", state);
     return "";
   }
 
@@ -1069,7 +1066,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (payload.opcion === "E") {
       if (s.lastMatrix && s.lastMatrix.texto !== payload.texto) s.lastCajon = null;
-      s.lastMatrix = { opcion: payload.opcion, texto: payload.texto || "", ts: payload.ts_event };
+      s.lastMatrix = { opcion: payload.opcion, texto: payload.texto || "", ts: payload.ts_event, nombreOverride: payload.nombreOverride || null };
       s.lastDowntime = null;
       s.matrixNeedsC = true;
       writeState(legajo, s); return;
@@ -1128,7 +1125,6 @@ document.addEventListener("DOMContentLoaded", () => {
     let texto = String(textInput.value || "").trim();
     const stateBefore = readState(legajo);
 
-    // Validacion input
     if (selected.input.show) {
       let ok;
       if (selected.code === "C" && isMatrix501(stateBefore)) {
@@ -1144,18 +1140,16 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // Validacion matriz para E
     if (selected.code === "E") {
       if (stateBefore.matrixNeedsC) {
         alert("Antes de iniciar una nueva matriz (E), envia al menos 1 Cajon (C).");
         return;
       }
-      // Validar que la matriz exista
       if (!matricesMap.has(texto)) {
         alert(`La matriz ${texto} no existe. Verifica el numero.`);
         return;
       }
-      // Matrices con variante: preguntar sub-tipo
+      // 8 matrices con variante
       const MATRICES_CON_VARIANTE = {
         "12": {
           pregunta: "Doblado Mango Plano - Selecciona el tipo:",
@@ -1165,14 +1159,67 @@ document.addEventListener("DOMContentLoaded", () => {
             { label: "Chef",        matriz: "12C" },
           ],
         },
+        "10": {
+          pregunta: "Matriz 10 - Selecciona el tipo de cuchilla:",
+          opciones: [
+            { label: "Varilla c/ Cuchilla Recta",  matriz: "10", nombre: "Varilla c/ Cuchilla Recta (HF11)" },
+            { label: "Varilla c/ Cuchilla Curva",   matriz: "10B", nombre: "Varilla c/ Cuchilla Curva (HF15)" },
+          ],
+        },
+        "39": {
+          pregunta: "Matriz 39 - Selecciona el tipo:",
+          opciones: [
+            { label: "Cpo Sacacorcho CON Marca", matriz: "39", nombre: "Cerrado Cuerpo Sacacorcho (Con Marca)" },
+            { label: "Cpo Sacacorcho SIN Marca", matriz: "39B", nombre: "Cerrado Cuerpo Sacacorcho (Sin Marca)" },
+          ],
+        },
+        "21": {
+          pregunta: "Matriz 21 - Selecciona el tipo:",
+          opciones: [
+            { label: "Loeke",     matriz: "21", nombre: "Destapacorona Loeke" },
+            { label: "Sin Marca", matriz: "21B", nombre: "Destapacorona Sin Marca" },
+          ],
+        },
+        "79": {
+          pregunta: "Matriz 79 - Corte Destapacorona:",
+          opciones: [
+            { label: "Loeke",     matriz: "79", nombre: "Corte Destapacorona Loeke" },
+            { label: "Sin Marca", matriz: "79B", nombre: "Corte Destapacorona Sin Marca" },
+          ],
+        },
+        "80": {
+          pregunta: "Matriz 80 - Estampa Destapacorona:",
+          opciones: [
+            { label: "Loeke",     matriz: "80", nombre: "Estampa Destapacorona Loeke" },
+            { label: "Sin Marca", matriz: "80B", nombre: "Estampa Destapacorona Sin Marca" },
+          ],
+        },
+        "81": {
+          pregunta: "Matriz 81 - Doblado Destapacorona:",
+          opciones: [
+            { label: "LK",       matriz: "81", nombre: "Doblado Destapacorona LK" },
+            { label: "Sin Marca", matriz: "81B", nombre: "Doblado Destapacorona Sin Marca" },
+          ],
+        },
+        "127": {
+          pregunta: "Matriz 127 - Selecciona el tipo:",
+          opciones: [
+            { label: "LK",  matriz: "127", nombre: "Estampado Pza Gr Sacaf LK" },
+            { label: "Chef", matriz: "127B", nombre: "Estampado Pza Gr Sacaf CH" },
+          ],
+        },
       };
-      if (MATRICES_CON_VARIANTE[texto]) {
+      if (MATRICES_CON_VARIANTE[texto] && !_varianteYaElegida) {
         const cfg = MATRICES_CON_VARIANTE[texto];
         const varianteElegida = await mostrarSelectorVariante(cfg.pregunta, cfg.opciones);
-        if (!varianteElegida) return; // canceló
-        texto = varianteElegida;
+        if (!varianteElegida) return;
+        texto = varianteElegida.matriz;
+        textInput.value = texto;
+        _varianteYaElegida = true;
+        if (varianteElegida.nombre) {
+          _nombreMatrizOverride = varianteElegida.nombre;
+        }
       }
-      // Alertar por WhatsApp si la matriz tiene Tiempo Promedio = 0
       const matCheck = matricesMap.get(texto);
       if (matCheck && (Number(matCheck.Tiempo_Promedio) === 0 || matCheck.Tiempo_Promedio === null)) {
         const emp = empleadosMap.get(String(legajo).trim());
@@ -1187,7 +1234,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // Validacion matriz en uso para C, RM, PM, RD
     if (["C", "RM", "PM", "RD"].includes(selected.code)) {
       if (!stateBefore.lastMatrix?.texto) {
         alert('Primero envia "E (Empece Matriz)" para registrar una matriz.');
@@ -1195,7 +1241,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // Validacion TM pendiente
     if (stateBefore.lastDowntime && !sameDowntime(stateBefore.lastDowntime, { opcion: selected.code, texto })) {
       alert(`Hay un Tiempo Muerto pendiente (${stateBefore.lastDowntime.opcion}). Envia el MISMO para cerrarlo.`);
       return;
@@ -1211,12 +1256,20 @@ document.addEventListener("DOMContentLoaded", () => {
       hs_inicio: "", matriz: ""
     };
 
+    // nombreOverride para variantes
+    if (selected.code === "E" && _nombreMatrizOverride) {
+      payload.nombreOverride = _nombreMatrizOverride;
+      _nombreMatrizOverride = null;
+    }
+
     if (["C", "RM", "PM", "RD"].includes(payload.opcion)) {
       payload.matriz = stateBefore.lastMatrix?.texto || "";
+      if (stateBefore.lastMatrix?.nombreOverride) {
+        payload.nombreOverride = stateBefore.lastMatrix.nombreOverride;
+      }
     }
     if (payload.opcion === "C") {
       payload.hs_inicio = computeHsInicio(stateBefore);
-      // Si no hay hs_inicio, usar el último evento del historial
       if (!payload.hs_inicio && stateBefore.last2.length > 0) {
         payload.hs_inicio = stateBefore.last2[0].ts || "";
       }
@@ -1224,12 +1277,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (["RM", "PM", "RD"].includes(payload.opcion)) {
       payload.hs_inicio = tsEvent;
     }
-    // Segundo TM igual = cierre
     if (stateBefore.lastDowntime && sameDowntime(stateBefore.lastDowntime, payload)) {
       payload.hs_inicio = stateBefore.lastDowntime.ts || "";
     }
 
-    // Alertar por WhatsApp si es RM o PM
     if (payload.opcion === "RM" || payload.opcion === "PM") {
       const emp = empleadosMap.get(String(legajo).trim());
       const nombre = emp?.Empleado || "Legajo " + legajo;
@@ -1253,7 +1304,6 @@ document.addEventListener("DOMContentLoaded", () => {
     enqueue(payload);
     renderSummary();
 
-    // Reset UI
     selected = null;
     selectedArea.classList.add("hidden");
     optionsScreen.classList.add("hidden");
@@ -1298,7 +1348,6 @@ document.addEventListener("DOMContentLoaded", () => {
     console.log("app.js OK - Supabase directo v2");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
-    // Funciona offline sin validacion de legajo/matriz
     renderOptions();
     renderSummary();
     renderPending();
