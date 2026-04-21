@@ -239,7 +239,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const { error } = await sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id" });
     if (error) throw new Error(error.message);
 
-    await procesarParaEspejo(item);
+    // Procesar espejo en background (no bloquea el envío principal)
+    procesarParaEspejo(item).catch(err => {
+      console.error("Error procesando espejo en background:", err.message || err);
+    });
   }
 
   /* ================= PROCESAMIENTO (replica n8n) ================= */
@@ -368,12 +371,16 @@ document.addEventListener("DOMContentLoaded", () => {
         const tiempoToma = uni > 0 ? Math.round((segNeto / uni) * 100) / 100 : 0;
         const premio = segHist > 0 ? Math.round(((-(segNeto / segHist) + 1) * 10) * 100) / 100 : 0;
 
-        await sb.from("db_n8n_espejo").update({
+        const { error } = await sb.from("db_n8n_espejo").update({
           Segundos_Tiempo_Muerto: segTM,
           Segundos_Trabajados:    segNeto,
           Tiempo_Toma:            tiempoToma,
           Premio:                 premio
         }).eq("ID_Ejecucion", cajon.ID_Ejecucion);
+        if (error) {
+          console.warn("Error actualizando cajon en espejo:", error.message);
+          // Continuar: recálculo es importante pero no crítico
+        }
       }
     } catch (err) {
       console.error("Error recalculando cajones del dia:", err);
@@ -460,12 +467,16 @@ document.addEventListener("DOMContentLoaded", () => {
       row.ID_Ejecucion = item.id ? hashId(item.id) : null;
 
       const { error } = await sb.from("db_n8n_espejo").insert(row);
-      if (error) console.error("Error insertando en db_n8n_espejo:", error);
+      if (error) {
+        console.warn("Error insertando en db_n8n_espejo:", error.message);
+        // No bloquear: solo loguear y continuar
+      }
       if (esTM && dateInfo.dia && dateInfo.mes) {
         await recalcularCajonesDelDia(legajo, dateInfo.dia, dateInfo.mes);
       }
     } catch (err) {
       console.error("Error procesando para espejo:", err);
+      // No relanzar: se ejecuta en background y no debe bloquear
     }
   }
 
@@ -1315,6 +1326,110 @@ document.addEventListener("DOMContentLoaded", () => {
     try { await flushQueue(); }
     finally { btnEnviar.disabled = false; btnEnviar.innerText = "Enviar"; }
   }
+
+  /* ================= HISTORIAL DIAS ANTERIORES ================= */
+  const btnHistDias = $("btnHistDias");
+  btnHistDias.addEventListener("click", () => {
+    const leg = legajoKey();
+    if (!leg) { alert("Ingresa tu legajo primero"); return; }
+
+    // Recolectar states de dias anteriores del localStorage
+    const dias = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(LS_PREFIX + "::")) continue;
+      const parts = k.split("::");
+      const dia = parts[1];
+      const legStored = parts[2];
+      if (legStored !== leg || dia === today) continue;
+      try {
+        const s = JSON.parse(localStorage.getItem(k));
+        if (s && s.last2 && s.last2.length > 0) dias.push({ dia, items: s.last2 });
+      } catch { /* skip */ }
+    }
+
+    dias.sort((a, b) => b.dia.localeCompare(a.dia)); // mas reciente primero
+
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:20px;overflow:auto";
+
+    const modal = document.createElement("div");
+    modal.style.cssText = "background:#fff;border-radius:18px;padding:20px;max-width:600px;width:95%;max-height:90vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)";
+
+    const btnClose = document.createElement("button");
+    btnClose.textContent = "✕";
+    btnClose.style.cssText = "float:right;border:none;background:none;font-size:22px;cursor:pointer;color:#666;padding:0;margin:0 0 0 8px;line-height:1";
+    btnClose.onclick = () => overlay.remove();
+    const header = document.createElement("div");
+    header.style.cssText = "margin-bottom:14px";
+    header.appendChild(btnClose);
+    const titulo2 = document.createElement("span");
+    titulo2.style.cssText = "font-size:18px;font-weight:800";
+    titulo2.textContent = `Historial - Legajo ${leg}`;
+    header.appendChild(titulo2);
+    modal.appendChild(header);
+
+    const safeTime = (ts) => {
+      if (!ts) return "";
+      try {
+        const d = new Date(String(ts).replace(/\s(\d{2}:\d{2})/, "T$1"));
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleTimeString("es-AR", { timeZone: "America/Argentina/Buenos_Aires", hour: "2-digit", minute: "2-digit" });
+      } catch { return ""; }
+    };
+
+    if (dias.length === 0) {
+      const empty = document.createElement("p");
+      empty.style.cssText = "color:#888;text-align:center;padding:20px";
+      empty.textContent = "Sin historial de dias anteriores";
+      modal.appendChild(empty);
+    } else {
+      // Botones de dia (filtro)
+      const btnRow = document.createElement("div");
+      btnRow.style.cssText = "display:flex;gap:6px;margin-bottom:16px";
+      const listContainer = document.createElement("div");
+
+      let activeDia = null;
+
+      const renderList = (items) => {
+        listContainer.innerHTML = "";
+        items.forEach(it => {
+          const statusColor = it.status === "sent" ? "#0b6b2c" : it.status === "failed" ? "#9b1c1c" : "#8a5a00";
+          const statusText = it.status === "sent" ? "ENVIADO" : it.status === "failed" ? "ERROR" : "PENDIENTE";
+          const row = document.createElement("div");
+          row.style.cssText = "padding:10px 0;border-bottom:1px solid #f3f4f6;font-size:18px";
+          row.innerHTML = `<span style="font-weight:700">${it.opcion}${it.texto ? ": " + it.texto : ""}</span> <span style="color:${statusColor};font-size:13px;font-weight:800">${statusText}</span> <span style="color:#888;font-size:14px">${safeTime(it.ts)}</span>`;
+          listContainer.appendChild(row);
+        });
+      };
+
+      dias.forEach(({ dia, items }) => {
+        const parts = dia.split("-");
+        const diaNum = parts[2] + "/" + parts[1];
+        const dow = ["Dom","Lun","Mar","Mie","Jue","Vie","Sab"][new Date(dia + "T12:00:00").getDay()];
+        const btn = document.createElement("button");
+        btn.style.cssText = "flex:1;padding:8px 2px;border:2px solid #d1d5db;border-radius:8px;background:#f8fafc;font-weight:800;font-size:13px;cursor:pointer;text-align:center;line-height:1.3";
+        btn.innerHTML = `${dow}<br>${diaNum}`;
+        btn.addEventListener("click", () => {
+          activeDia = dia;
+          btnRow.querySelectorAll("button").forEach(b => { b.style.background = "#f8fafc"; b.style.borderColor = "#e5e7eb"; b.style.color = "#222"; });
+          btn.style.background = "#1e40af"; btn.style.borderColor = "#1e40af"; btn.style.color = "#fff";
+          renderList(items);
+        });
+        btnRow.appendChild(btn);
+      });
+
+      modal.appendChild(btnRow);
+      modal.appendChild(listContainer);
+
+      // Seleccionar el primer dia por defecto
+      btnRow.querySelector("button").click();
+    }
+
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+  });
 
   /* ================= EVENTOS ================= */
   btnContinuar.addEventListener("click", goToOptions);
