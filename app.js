@@ -585,7 +585,7 @@ document.addEventListener("DOMContentLoaded", () => {
     { code: "PC", desc: "Pare Comida", row: 3, input: { show: false } },
     { code: "RD", desc: "Rollo Fleje Doblado", row: 3, input: { show: false } },
     { code: "MOV P", desc: "Movimiento Piedra", row: 3, input: { show: false } },
-    { code: "CM", desc: "Cambiar Matriz", row: 4, input: { show: false } },
+    { code: "CM", desc: "Cambiar Matriz", row: 4, input: { show: true, label: "Numero matriz nueva", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
     { code: "PM", desc: "Pare Matriz", row: 4, input: { show: false } },
     { code: "RM", desc: "Rotura Matriz", row: 4, input: { show: false } },
     { code: "REM", desc: "Reparando Matriz", row: 4, input: { show: false } }
@@ -1244,7 +1244,12 @@ document.addEventListener("DOMContentLoaded", () => {
         });
       }
     }
-
+    if (selected.code === "CM") {
+      if (!matricesMap.has(texto)) {
+        alert(`La matriz ${texto} no existe. Verifica el numero.`);
+        return;
+      }
+    }
     if (["C", "RM", "PM", "RD"].includes(selected.code)) {
       if (!stateBefore.lastMatrix?.texto) {
         alert('Primero envia "E (Empece Matriz)" para registrar una matriz.');
