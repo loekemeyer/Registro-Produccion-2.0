@@ -204,23 +204,85 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   function writeQueue(arr) { localStorage.setItem(LS_QUEUE, JSON.stringify(arr)); }
 
+  /* ================= IDB ESPEJO PARA BACKGROUND SYNC ================= */
+  const IDB_NAME = "registro-prod";
+  const IDB_VERSION = 1;
+  const IDB_STORE = "queue";
+  let _dbPromise = null;
+
+  function idbOpen() {
+    if (_dbPromise) return _dbPromise;
+    if (!("indexedDB" in window)) {
+      _dbPromise = Promise.reject(new Error("IDB not available"));
+      return _dbPromise;
+    }
+    _dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE, { keyPath: "id" });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return _dbPromise;
+  }
+
+  function idbPut(item) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      const r = tx.objectStore(IDB_STORE).put(item);
+      r.onsuccess = () => resolve();
+      r.onerror = () => reject(r.error);
+    }));
+  }
+
+  function idbDelete(id) {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      const r = tx.objectStore(IDB_STORE).delete(id);
+      r.onsuccess = () => resolve();
+      r.onerror = () => reject(r.error);
+    }));
+  }
+
+  async function migrateQueueToIDB() {
+    const q = readQueue();
+    if (!q.length) return;
+    for (const item of q) {
+      try { await idbPut(item); } catch { /* ignore */ }
+    }
+  }
+
+  async function registerBackgroundSync() {
+    if (!("serviceWorker" in navigator)) return;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      if (reg && "sync" in reg) {
+        await reg.sync.register("flush-queue");
+      }
+    } catch { /* not supported, ignore */ }
+  }
+
   function updateSyncBadge() {
     const badge = document.getElementById("syncBadge");
     if (!badge) return;
     const q = readQueue();
     const failed = q.filter(x => (x.__tries || 0) > 0).length;
     if (q.length === 0) {
-      badge.textContent = "v1.4 ✓";
+      badge.textContent = "v1.5 ✓";
       badge.style.background = "#f0fdf4";
       badge.style.color = "#166534";
       badge.style.borderColor = "#bbf7d0";
     } else if (failed > 0) {
-      badge.textContent = `v1.4 ⚠ ${q.length}`;
+      badge.textContent = `v1.5 ⚠ ${q.length}`;
       badge.style.background = "#fef2f2";
       badge.style.color = "#991b1b";
       badge.style.borderColor = "#fecaca";
     } else {
-      badge.textContent = `v1.4 ⏳ ${q.length}`;
+      badge.textContent = `v1.5 ⏳ ${q.length}`;
       badge.style.background = "#fffbeb";
       badge.style.color = "#92400e";
       badge.style.borderColor = "#fde68a";
@@ -228,9 +290,12 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function enqueue(payload) {
+    const item = { ...payload, __tries: 0, __queuedAt: isoNow() };
     const q = readQueue();
-    q.push({ ...payload, __tries: 0, __queuedAt: isoNow() });
+    q.push(item);
     writeQueue(q);
+    idbPut(item).catch(() => {});
+    registerBackgroundSync();
 
     const leg = String(payload.legajo || "").trim();
     if (leg) {
@@ -555,6 +620,7 @@ document.addEventListener("DOMContentLoaded", () => {
           q = readQueue();
           const idx = q.findIndex(x => x.id === item.id);
           if (idx !== -1) { q.splice(idx, 1); writeQueue(q); }
+          idbDelete(item.id).catch(() => {});
         } catch (err) {
           item.__tries = (item.__tries || 0) + 1;
           updateHistoryItem(item.legajo, item.id, {
@@ -566,6 +632,7 @@ document.addEventListener("DOMContentLoaded", () => {
           }
           const idx = q.findIndex(x => x.id === item.id);
           if (idx !== -1) { q[idx] = item; writeQueue(q); }
+          idbPut(item).catch(() => {});
         }
       }
     } finally {
@@ -764,6 +831,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const q = readQueue().filter(x => x.id !== item.id);
     writeQueue(q);
+    if (item.id) idbDelete(item.id).catch(() => {});
 
     if (eraUnTM && tsParaDia) {
       const dateInfo = dateFromISO(tsParaDia);
@@ -995,6 +1063,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (qItem) {
       qItem.opcion = code; qItem.descripcion = opt.desc; qItem.texto = texto;
       writeQueue(q);
+      idbPut(qItem).catch(() => {});
     }
 
     editModal.classList.add("hidden");
@@ -1551,12 +1620,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
   /* ================= INIT ================= */
   updateSyncBadge();
+  migrateQueueToIDB();
+  if (readQueue().length > 0) registerBackgroundSync();
   cargarCatalogos().then(() => {
     renderOptions();
     renderSummary();
     renderPending();
     updateSyncBadge();
-    console.log("app.js OK - v1.4");
+    console.log("app.js OK - v1.5");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
