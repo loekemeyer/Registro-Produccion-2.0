@@ -1500,7 +1500,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderOptions();
     renderSummary();
     renderPending();
-    console.log("app.js OK - Supabase directo v2");
+    console.log("app.js OK - v1.1");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
