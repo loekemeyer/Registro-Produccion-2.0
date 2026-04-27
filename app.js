@@ -204,6 +204,29 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   function writeQueue(arr) { localStorage.setItem(LS_QUEUE, JSON.stringify(arr)); }
 
+  function updateSyncBadge() {
+    const badge = document.getElementById("syncBadge");
+    if (!badge) return;
+    const q = readQueue();
+    const failed = q.filter(x => (x.__tries || 0) > 0).length;
+    if (q.length === 0) {
+      badge.textContent = "v1.3 ✓";
+      badge.style.background = "#f0fdf4";
+      badge.style.color = "#166534";
+      badge.style.borderColor = "#bbf7d0";
+    } else if (failed > 0) {
+      badge.textContent = `v1.3 ⚠ ${q.length}`;
+      badge.style.background = "#fef2f2";
+      badge.style.color = "#991b1b";
+      badge.style.borderColor = "#fecaca";
+    } else {
+      badge.textContent = `v1.3 ⏳ ${q.length}`;
+      badge.style.background = "#fffbeb";
+      badge.style.color = "#92400e";
+      badge.style.borderColor = "#fde68a";
+    }
+  }
+
   function enqueue(payload) {
     const q = readQueue();
     q.push({ ...payload, __tries: 0, __queuedAt: isoNow() });
@@ -221,6 +244,7 @@ document.addEventListener("DOMContentLoaded", () => {
       s.last2 = s.last2.slice(0, MAX_DAY_HISTORY);
       writeState(leg, s);
     }
+    updateSyncBadge();
   }
 
   /* ================= ENVIO A SUPABASE ================= */
@@ -546,6 +570,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     } finally {
       isFlushing = false;
+      updateSyncBadge();
       if (didWork) {
         renderSummary();
         renderPending();
@@ -1487,6 +1512,15 @@ document.addEventListener("DOMContentLoaded", () => {
   btnBackLabel.addEventListener("click", backToLegajo);
   btnResetSelection.addEventListener("click", resetSelection);
   btnEnviar.addEventListener("click", sendFast);
+
+  const syncBadgeEl = document.getElementById("syncBadge");
+  if (syncBadgeEl) {
+    syncBadgeEl.addEventListener("click", () => {
+      syncBadgeEl.style.transform = "scale(0.92)";
+      setTimeout(() => { syncBadgeEl.style.transform = ""; }, 120);
+      flushQueue();
+    });
+  }
   legajoInput.addEventListener("keydown", e => { if (e.key === "Enter") goToOptions(); });
 
   let legajoTimer = null;
@@ -1506,15 +1540,18 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(() => flushQueue(), 3000);
 
   /* ================= INIT ================= */
+  updateSyncBadge();
   cargarCatalogos().then(() => {
     renderOptions();
     renderSummary();
     renderPending();
-    console.log("app.js OK - v1.2");
+    updateSyncBadge();
+    console.log("app.js OK - v1.3");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
     renderSummary();
     renderPending();
+    updateSyncBadge();
   });
 });
