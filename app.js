@@ -210,17 +210,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const q = readQueue();
     const failed = q.filter(x => (x.__tries || 0) > 0).length;
     if (q.length === 0) {
-      badge.textContent = "v1.3 ✓";
+      badge.textContent = "v1.4 ✓";
       badge.style.background = "#f0fdf4";
       badge.style.color = "#166534";
       badge.style.borderColor = "#bbf7d0";
     } else if (failed > 0) {
-      badge.textContent = `v1.3 ⚠ ${q.length}`;
+      badge.textContent = `v1.4 ⚠ ${q.length}`;
       badge.style.background = "#fef2f2";
       badge.style.color = "#991b1b";
       badge.style.borderColor = "#fecaca";
     } else {
-      badge.textContent = `v1.3 ⏳ ${q.length}`;
+      badge.textContent = `v1.4 ⏳ ${q.length}`;
       badge.style.background = "#fffbeb";
       badge.style.color = "#92400e";
       badge.style.borderColor = "#fde68a";
@@ -1539,6 +1539,16 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   setInterval(() => flushQueue(), 3000);
 
+  /* ================= SERVICE WORKER ================= */
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js", { updateViaCache: "none" })
+      .then((reg) => {
+        console.log("SW registrado", reg.scope);
+        setInterval(() => { reg.update().catch(() => {}); }, 60000);
+      })
+      .catch((err) => console.warn("SW no se pudo registrar:", err));
+  }
+
   /* ================= INIT ================= */
   updateSyncBadge();
   cargarCatalogos().then(() => {
@@ -1546,7 +1556,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderSummary();
     renderPending();
     updateSyncBadge();
-    console.log("app.js OK - v1.3");
+    console.log("app.js OK - v1.4");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
