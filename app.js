@@ -224,6 +224,35 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= ENVIO A SUPABASE ================= */
+  const SEND_TIMEOUT_MS = 15000;
+
+  async function withTimeout(promise, ms, errMsg) {
+    let timer;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(errMsg)), ms);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function logErrorToSupabase(item, err) {
+    try {
+      sb.from("Auditoria_Produccion").insert({
+        legajo:          String(item.legajo || ""),
+        accion:          "ERROR_ENVIO",
+        id_registro:     item.id ? String(item.id) : null,
+        opcion_original: item.opcion || null,
+        desc_original:   item.descripcion || null,
+        texto_original:  item.texto || null,
+        ts_evento:       item.ts_event || null,
+        texto_nuevo:     `Intento ${item.__tries || 1}: ${String(err.message || err).slice(0, 400)}`
+      }).then(() => {}, () => {});
+    } catch { /* fire and forget */ }
+  }
+
   async function postToSupabase(item) {
     const payload = {
       id: item.id,
@@ -236,10 +265,13 @@ document.addEventListener("DOMContentLoaded", () => {
       matriz: item.matriz || ""
     };
 
-    const { error } = await sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id" });
-    if (error) throw new Error(error.message);
+    const result = await withTimeout(
+      sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id" }),
+      SEND_TIMEOUT_MS,
+      `Timeout ${SEND_TIMEOUT_MS / 1000}s al enviar a Supabase`
+    );
+    if (result.error) throw new Error(result.error.message);
 
-    // Procesar espejo en background (no bloquea el envío principal)
     procesarParaEspejo(item).catch(err => {
       console.error("Error procesando espejo en background:", err.message || err);
     });
@@ -483,7 +515,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let isFlushing = false;
 
   async function flushQueue() {
-    if (isFlushing || !navigator.onLine) return;
+    if (isFlushing) return;
     isFlushing = true;
     try {
       let q = readQueue();
@@ -503,6 +535,9 @@ document.addEventListener("DOMContentLoaded", () => {
             status: "failed", failedAt: isoNow(),
             tries: item.__tries, lastError: String(err.message || err)
           });
+          if (item.__tries === 1 || item.__tries % 5 === 0) {
+            logErrorToSupabase(item, err);
+          }
           const idx = q.findIndex(x => x.id === item.id);
           if (idx !== -1) { q[idx] = item; writeQueue(q); }
         }
@@ -1458,7 +1493,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const end = Date.now() + 3000;
     while (Date.now() < end && readQueue().length) await flushQueue();
   });
-  setInterval(() => flushQueue(), 5000);
+  setInterval(() => flushQueue(), 3000);
 
   /* ================= INIT ================= */
   cargarCatalogos().then(() => {
