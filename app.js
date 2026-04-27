@@ -517,12 +517,14 @@ document.addEventListener("DOMContentLoaded", () => {
   async function flushQueue() {
     if (isFlushing) return;
     isFlushing = true;
+    let didWork = false;
     try {
       let q = readQueue();
       if (!q.length) return;
 
       const batch = q.slice(0, 20);
       for (const item of batch) {
+        didWork = true;
         try {
           await postToSupabase(item);
           updateHistoryItem(item.legajo, item.id, { status: "sent", sentAt: isoNow() });
@@ -544,8 +546,10 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     } finally {
       isFlushing = false;
-      renderSummary();
-      renderPending();
+      if (didWork) {
+        renderSummary();
+        renderPending();
+      }
     }
   }
 
@@ -647,6 +651,9 @@ document.addEventListener("DOMContentLoaded", () => {
       return '';
     };
 
+    const prevScrollable = daySummary.querySelector(".t2");
+    const prevScroll = prevScrollable ? prevScrollable.scrollTop : 0;
+
     if (!s.last2.length) {
       daySummary.className = ""; daySummary.innerHTML = '<div class="day-item"><div class="t1">Historial del dia</div><div class="t2">Sin registros</div></div>';
       return;
@@ -672,6 +679,9 @@ document.addEventListener("DOMContentLoaded", () => {
           `).join("")}
         </div>
       </div>`;
+
+    const newScrollable = daySummary.querySelector(".t2");
+    if (newScrollable && prevScroll) newScrollable.scrollTop = prevScroll;
 
     daySummary.querySelectorAll(".hist-edit").forEach(btn => {
       btn.addEventListener("click", () => editHistItem(leg, parseInt(btn.dataset.idx)));
@@ -1500,7 +1510,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderOptions();
     renderSummary();
     renderPending();
-    console.log("app.js OK - v1.1");
+    console.log("app.js OK - v1.2");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
