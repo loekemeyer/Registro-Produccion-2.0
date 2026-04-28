@@ -248,6 +248,41 @@ document.addEventListener("DOMContentLoaded", () => {
     }));
   }
 
+  function idbGetAll() {
+    return idbOpen().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const r = tx.objectStore(IDB_STORE).getAll();
+      r.onsuccess = () => resolve(r.result || []);
+      r.onerror = () => reject(r.error);
+    }));
+  }
+
+  // Reconcilia localStorage con IDB: items en LS que faltan en IDB = el SW ya los envio en background.
+  // Los marca sent y los saca de la cola de localStorage para evitar loop de reintentos.
+  async function reconcileQueueWithIDB() {
+    let idbItems;
+    try { idbItems = await idbGetAll(); } catch { return; }
+    const idbIds = new Set(idbItems.map(x => x.id));
+    const lsQueue = readQueue();
+    if (!lsQueue.length) return;
+    const stillQueued = [];
+    let recovered = 0;
+    for (const item of lsQueue) {
+      if (idbIds.has(item.id)) {
+        stillQueued.push(item);
+      } else {
+        if (item.legajo && item.id) {
+          try { updateHistoryItem(item.legajo, item.id, { status: "sent", sentAt: isoNow() }); } catch {}
+        }
+        recovered++;
+      }
+    }
+    if (recovered > 0) {
+      writeQueue(stillQueued);
+      console.log("[reconcile] " + recovered + " items ya enviados por SW, removidos de cola LS");
+    }
+  }
+
   async function migrateQueueToIDB() {
     const q = readQueue();
     if (!q.length) return;
@@ -272,17 +307,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const q = readQueue();
     const failed = q.filter(x => (x.__tries || 0) > 0).length;
     if (q.length === 0) {
-      badge.textContent = "v1.5 ✓";
+      badge.textContent = "v1.6 ✓";
       badge.style.background = "#f0fdf4";
       badge.style.color = "#166534";
       badge.style.borderColor = "#bbf7d0";
     } else if (failed > 0) {
-      badge.textContent = `v1.5 ⚠ ${q.length}`;
+      badge.textContent = `v1.6 ⚠ ${q.length}`;
       badge.style.background = "#fef2f2";
       badge.style.color = "#991b1b";
       badge.style.borderColor = "#fecaca";
     } else {
-      badge.textContent = `v1.5 ⏳ ${q.length}`;
+      badge.textContent = `v1.6 ⏳ ${q.length}`;
       badge.style.background = "#fffbeb";
       badge.style.color = "#92400e";
       badge.style.borderColor = "#fde68a";
@@ -355,15 +390,21 @@ document.addEventListener("DOMContentLoaded", () => {
     };
 
     const result = await withTimeout(
-      sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id" }),
+      sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id", ignoreDuplicates: true }).select(),
       SEND_TIMEOUT_MS,
       `Timeout ${SEND_TIMEOUT_MS / 1000}s al enviar a Supabase`
     );
     if (result.error) throw new Error(result.error.message);
 
-    procesarParaEspejo(item).catch(err => {
-      console.error("Error procesando espejo en background:", err.message || err);
-    });
+    // Si .data esta vacio = id ya existia (duplicado), no reprocesar espejo
+    const wasInserted = Array.isArray(result.data) && result.data.length > 0;
+    if (wasInserted) {
+      procesarParaEspejo(item).catch(err => {
+        console.error("Error procesando espejo en background:", err.message || err);
+      });
+    } else {
+      console.log("Item ya existia en DB, no reprocesar espejo:", item.id);
+    }
   }
 
   /* ================= PROCESAMIENTO (replica n8n) ================= */
@@ -1625,14 +1666,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
   /* ================= INIT ================= */
   updateSyncBadge();
-  migrateQueueToIDB();
+  // reconcilia primero (saca de LS los que el SW ya envio en background) y despues migra
+  reconcileQueueWithIDB().then(() => {
+    migrateQueueToIDB();
+    updateSyncBadge();
+  });
   if (readQueue().length > 0) registerBackgroundSync();
   cargarCatalogos().then(() => {
     renderOptions();
     renderSummary();
     renderPending();
     updateSyncBadge();
-    console.log("app.js OK - v1.5");
+    console.log("app.js OK - v1.6");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();

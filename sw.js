@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v1.5";
+const CACHE_VERSION = "v1.6";
 const CACHE_NAME = `registro-cache-${CACHE_VERSION}`;
 const STATIC_ASSETS = [
   "./",
@@ -68,7 +68,7 @@ async function postToSupabase(item) {
         "apikey": SUPABASE_KEY,
         "Authorization": "Bearer " + SUPABASE_KEY,
         "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=minimal"
+        "Prefer": "resolution=ignore-duplicates,return=minimal"
       },
       body: JSON.stringify(payload)
     }
