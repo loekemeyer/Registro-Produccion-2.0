@@ -1183,12 +1183,17 @@ document.addEventListener("DOMContentLoaded", () => {
     errorEl.innerText = "";
     textInput.value = "";
 
-    if (opt.input.show) {
+    // CM: 2da pulsacion cierra el TM, no pide input
+    const stateSel = readState(legajoKey());
+    const cmCerrando = opt.code === "CM" && stateSel?.lastDowntime?.opcion === "CM";
+
+    if (opt.input.show && !cmCerrando) {
       inputArea.classList.remove("hidden");
       inputLabel.innerText = opt.input.label;
       textInput.placeholder = opt.input.placeholder;
     } else {
       inputArea.classList.add("hidden");
+      if (cmCerrando) textInput.value = stateSel.lastDowntime.texto || "";
     }
     renderMatrizInfo();
   }
