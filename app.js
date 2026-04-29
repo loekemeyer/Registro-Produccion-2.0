@@ -604,11 +604,16 @@ document.addEventListener("DOMContentLoaded", () => {
         anularTiempo = false;
       }
 
+      const destinoCM = op === "CM" ? String(item.texto || item.matriz || "").trim() : "";
       const row = {
         Fecha: tsEvent,
         Legajo: legajo,
         // nombreOverride para variantes (ej: Mat 10 recta/curva)
-        Nombre_Matriz: esCajon ? (item.nombreOverride || nombreMatriz) : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion),
+        Nombre_Matriz: esCajon
+          ? (item.nombreOverride || nombreMatriz)
+          : (op === "CM" && destinoCM
+              ? `Cambiar Matriz a ${destinoCM}`
+              : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion)),
         Matriz: esCajon ? matNum : (esRM_PM_RD_LT ? matNum : op),
         Uni: uni,
         Premio: premio,
@@ -1042,9 +1047,10 @@ document.addEventListener("DOMContentLoaded", () => {
             const segTrabajados = Math.max(1, toSec(horaFin) - toSec(horaInicio));
             const dateInfo = dateFromISO(item.ts);
 
+            const destinoCM = code === "CM" ? String(item.texto || item.matriz || "").trim() : "";
             const tmData = {
               Matriz: code,
-              Nombre_Matriz: opt.desc,
+              Nombre_Matriz: code === "CM" && destinoCM ? `Cambiar Matriz a ${destinoCM}` : opt.desc,
               Uni: 0,
               Premio: 0,
               Tiempo_Toma: 0,
