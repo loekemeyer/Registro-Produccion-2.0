@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v1.6";
+const CACHE_VERSION = "v1.7";
 const CACHE_NAME = `registro-cache-${CACHE_VERSION}`;
 const STATIC_ASSETS = [
   "./",
@@ -103,11 +103,19 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys()
-      .then((names) => Promise.all(
-        names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
-      ))
-      .then(() => self.clients.claim())
+    (async () => {
+      const names = await caches.keys();
+      await Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)));
+      await self.clients.claim();
+      // Forzar reload de tabs abiertas para cargar nueva version del JS.
+      // navigate() funciona sin necesidad de listener en el cliente viejo.
+      const clients = await self.clients.matchAll({ type: "window" });
+      for (const client of clients) {
+        try { await client.navigate(client.url); } catch { /* ignore */ }
+        // Fallback: si navigate falla (e.g. cross-origin), enviar mensaje
+        try { client.postMessage({ type: "SW_UPDATED", version: CACHE_VERSION }); } catch {}
+      }
+    })()
   );
 });
 

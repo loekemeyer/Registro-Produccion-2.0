@@ -184,15 +184,33 @@ document.addEventListener("DOMContentLoaded", () => {
     writeState(legajo, s);
   }
 
-  /* ================= RESET DIARIO ================= */
+  /* ================= RESET DIARIO (retiene 10 dias laborales) ================= */
   const today = dayKeyAR();
+
+  function getLastNWorkdays(n) {
+    const days = new Set();
+    const d = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+    while (days.size < n) {
+      const dow = d.getDay(); // 0=dom, 6=sab
+      if (dow !== 0 && dow !== 6) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        days.add(`${y}-${m}-${dd}`);
+      }
+      d.setDate(d.getDate() - 1);
+    }
+    return days;
+  }
+
   const lastDay = localStorage.getItem(DAY_GUARD_KEY);
   if (lastDay && lastDay !== today) {
+    const keepDays = getLastNWorkdays(10);
     for (let i = localStorage.length - 1; i >= 0; i--) {
       const k = localStorage.key(i);
       if (!k || !k.startsWith(LS_PREFIX + "::")) continue;
       const parts = k.split("::");
-      if (parts[1] !== today) localStorage.removeItem(k);
+      if (!keepDays.has(parts[1])) localStorage.removeItem(k);
     }
   }
   localStorage.setItem(DAY_GUARD_KEY, today);
@@ -307,17 +325,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const q = readQueue();
     const failed = q.filter(x => (x.__tries || 0) > 0).length;
     if (q.length === 0) {
-      badge.textContent = "v1.6 ✓";
+      badge.textContent = "v1.7 ✓";
       badge.style.background = "#f0fdf4";
       badge.style.color = "#166534";
       badge.style.borderColor = "#bbf7d0";
     } else if (failed > 0) {
-      badge.textContent = `v1.6 ⚠ ${q.length}`;
+      badge.textContent = `v1.7 ⚠ ${q.length}`;
       badge.style.background = "#fef2f2";
       badge.style.color = "#991b1b";
       badge.style.borderColor = "#fecaca";
     } else {
-      badge.textContent = `v1.6 ⏳ ${q.length}`;
+      badge.textContent = `v1.7 ⏳ ${q.length}`;
       badge.style.background = "#fffbeb";
       badge.style.color = "#92400e";
       badge.style.borderColor = "#fde68a";
@@ -390,21 +408,18 @@ document.addEventListener("DOMContentLoaded", () => {
     };
 
     const result = await withTimeout(
-      sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id", ignoreDuplicates: true }).select(),
+      sb.from(TABLA_REGISTROS).upsert(payload, { onConflict: "id", ignoreDuplicates: true }),
       SEND_TIMEOUT_MS,
       `Timeout ${SEND_TIMEOUT_MS / 1000}s al enviar a Supabase`
     );
     if (result.error) throw new Error(result.error.message);
 
-    // Si .data esta vacio = id ya existia (duplicado), no reprocesar espejo
-    const wasInserted = Array.isArray(result.data) && result.data.length > 0;
-    if (wasInserted) {
-      procesarParaEspejo(item).catch(err => {
-        console.error("Error procesando espejo en background:", err.message || err);
-      });
-    } else {
-      console.log("Item ya existia en DB, no reprocesar espejo:", item.id);
-    }
+    // Procesar espejo SIEMPRE - es idempotente via upsert con onConflict ID_Ejecucion.
+    // El check anterior wasInserted (data.length > 0) fallaba porque .select() con
+    // ignoreDuplicates puede devolver [] aun cuando se inserto, perdiendo cajones del 29/04.
+    procesarParaEspejo(item).catch(err => {
+      console.error("Error procesando espejo en background:", err.message || err);
+    });
   }
 
   /* ================= PROCESAMIENTO (replica n8n) ================= */
@@ -633,9 +648,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
       row.ID_Ejecucion = item.id ? hashId(item.id) : null;
 
-      const { error } = await sb.from("db_n8n_espejo").insert(row);
+      // Upsert idempotente DO NOTHING: si ya existe (re-procesamiento), no rompe ni dispara policy UPDATE de RLS.
+      const { error } = await sb.from("db_n8n_espejo").upsert(row, { onConflict: "ID_Ejecucion", ignoreDuplicates: true });
       if (error) {
-        console.warn("Error insertando en db_n8n_espejo:", error.message);
+        console.warn("Error upsertando en db_n8n_espejo:", error.message);
         // No bloquear: solo loguear y continuar
       }
       if (esTM && dateInfo.dia && dateInfo.mes) {
@@ -1668,6 +1684,14 @@ document.addEventListener("DOMContentLoaded", () => {
         setInterval(() => { reg.update().catch(() => {}); }, 60000);
       })
       .catch((err) => console.warn("SW no se pudo registrar:", err));
+
+    // Cuando llega mensaje de SW activado nuevo, recargar para tomar nuevo JS
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data && event.data.type === "SW_UPDATED") {
+        console.log("[SW] Nueva version", event.data.version, "- recargando...");
+        window.location.reload();
+      }
+    });
   }
 
   /* ================= INIT ================= */
@@ -1683,7 +1707,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderSummary();
     renderPending();
     updateSyncBadge();
-    console.log("app.js OK - v1.6");
+    console.log("app.js OK - v1.7");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
