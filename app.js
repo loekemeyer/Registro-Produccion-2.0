@@ -1438,6 +1438,12 @@ document.addEventListener("DOMContentLoaded", () => {
           _nombreMatrizOverride = varianteElegida.nombre;
         }
       }
+      if (!matricesMap.has(texto)) {
+        alert(`La matriz ${texto} no existe. Verifica el numero.`);
+        _varianteYaElegida = false;
+        _nombreMatrizOverride = null;
+        return;
+      }
       const matCheck = matricesMap.get(texto);
       if (matCheck && (Number(matCheck.Tiempo_Historico) === 0 || matCheck.Tiempo_Historico === null)) {
         const emp = empleadosMap.get(String(legajo).trim());
