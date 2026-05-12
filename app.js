@@ -466,20 +466,30 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function dateFromISO(iso) {
     const d = toAR(iso);
-    if (!d) return { dia: 0, mes: 0, quincena: 1 };
+    if (!d) return { dia: 0, mes: 0, quincena: 1, anio: 0 };
     const dia = d.getDate();
     const mes = d.getMonth() + 1;
-    return { dia, mes, quincena: dia > 15 ? 2 : 1 };
+    const anio = d.getFullYear();
+    return { dia, mes, quincena: dia > 15 ? 2 : 1, anio };
+  }
+
+  function rangoFechaAR(anio, mes, dia) {
+    const pad = (n) => String(n).padStart(2, "0");
+    const ini = `${anio}-${pad(mes)}-${pad(dia)}T00:00:00-03:00`;
+    const finDate = new Date(ini);
+    finDate.setDate(finDate.getDate() + 1);
+    return { ini, fin: finDate.toISOString() };
   }
 
   async function buscarTiemposMuertos(legajo, hsInicio, horaFin, fecha) {
     const dateInfo = dateFromISO(fecha);
-    if (!dateInfo.dia || !dateInfo.mes) return 0;
+    if (!dateInfo.dia || !dateInfo.mes || !dateInfo.anio) return 0;
 
     const hiTime = timeFromISO(hsInicio);
     const hfTime = timeFromISO(horaFin);
     if (!hiTime || !hfTime) return 0;
 
+    const rango = rangoFechaAR(dateInfo.anio, dateInfo.mes, dateInfo.dia);
     try {
       const { data } = await sb.from("db_n8n_espejo")
         .select("Segundos_Tiempo_Muerto, Hora_Inicio, Hora_Fin")
@@ -487,6 +497,8 @@ document.addEventListener("DOMContentLoaded", () => {
         .eq("Dia", dateInfo.dia)
         .eq("Mes", dateInfo.mes)
         .eq("Uni", 0)
+        .gte("Fecha", rango.ini)
+        .lt("Fecha", rango.fin)
         .is("Eliminar", null);
 
       if (!data || !data.length) return 0;
@@ -500,7 +512,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= RECALCULAR CAJONES AFECTADOS POR CAMBIO DE TM ================= */
-  async function recalcularCajonesDelDia(legajo, dia, mes) {
+  async function recalcularCajonesDelDia(legajo, dia, mes, anio) {
+    if (!anio) return;
+    const rango = rangoFechaAR(anio, mes, dia);
     try {
       const { data: cajones } = await sb.from("db_n8n_espejo")
         .select("ID_Ejecucion, Hora_Inicio, Hora_Fin, Uni, Segundos_Trabajados, Tiempo_Historico")
@@ -508,6 +522,8 @@ document.addEventListener("DOMContentLoaded", () => {
         .eq("Dia", dia)
         .eq("Mes", mes)
         .gt("Uni", 0)
+        .gte("Fecha", rango.ini)
+        .lt("Fecha", rango.fin)
         .is("Eliminar", null);
 
       if (!cajones || !cajones.length) return;
@@ -518,6 +534,8 @@ document.addEventListener("DOMContentLoaded", () => {
         .eq("Dia", dia)
         .eq("Mes", mes)
         .eq("Uni", 0)
+        .gte("Fecha", rango.ini)
+        .lt("Fecha", rango.fin)
         .is("Eliminar", null);
 
       const tms = tiemposMuertos || [];
@@ -580,7 +598,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const matNum = String(item.matriz || "").trim();
       const matInfo = matricesMap.get(matNum);
       const nombreMatriz = matInfo?.Matriz || "";
-      const tiempoPromedio = Number(matInfo?.Tiempo_Promedio || 0);
+      const tiempoPromedio = Number(matInfo?.Tiempo_Historico || 0);
 
       // FIX Bug 501: reemplazar coma por punto antes de Number()
       const uni = esCajon ? Number(String(item.texto || 0).replace(",", ".")) : 0;
@@ -655,7 +673,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // No bloquear: solo loguear y continuar
       }
       if (esTM && dateInfo.dia && dateInfo.mes) {
-        await recalcularCajonesDelDia(legajo, dateInfo.dia, dateInfo.mes);
+        await recalcularCajonesDelDia(legajo, dateInfo.dia, dateInfo.mes, dateInfo.anio);
       }
     } catch (err) {
       console.error("Error procesando para espejo:", err);
@@ -898,7 +916,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (eraUnTM && tsParaDia) {
       const dateInfo = dateFromISO(tsParaDia);
       if (dateInfo.dia && dateInfo.mes) {
-        await recalcularCajonesDelDia(leg, dateInfo.dia, dateInfo.mes);
+        await recalcularCajonesDelDia(leg, dateInfo.dia, dateInfo.mes, dateInfo.anio);
       }
     }
 
@@ -998,23 +1016,30 @@ document.addEventListener("DOMContentLoaded", () => {
             const uni = Number(String(texto).replace(",", ".")) || 0;
             const matNum = String(item.matriz || "").trim();
             const matInfo = matricesMap.get(matNum);
-            const tProm = Number(matInfo?.Tiempo_Promedio || 0);
+            const tProm = Number(matInfo?.Tiempo_Historico || 0);
             const segHist = tProm * uni;
 
             const horaInicio = fila?.Hora_Inicio || timeFromISO(item.hsInicio || item.ts);
             const horaFin = fila?.Hora_Fin || timeFromISO(item.ts);
-            const dia = fila?.Dia || dateFromISO(item.ts).dia;
-            const mes = fila?.Mes || dateFromISO(item.ts).mes;
+            const diRef = dateFromISO(item.ts);
+            const dia = fila?.Dia || diRef.dia;
+            const mes = fila?.Mes || diRef.mes;
+            const anio = diRef.anio;
 
             const segBruto = Math.max(1, toSec(horaFin) - toSec(horaInicio));
 
-            const { data: tms } = await sb.from("db_n8n_espejo")
+            const rangoEdit = anio ? rangoFechaAR(anio, mes, dia) : null;
+            let queryTms = sb.from("db_n8n_espejo")
               .select("Hora_Inicio, Hora_Fin, Segundos_Tiempo_Muerto")
               .eq("Legajo", item.legajo)
               .eq("Dia", dia)
               .eq("Mes", mes)
               .eq("Uni", 0)
               .is("Eliminar", null);
+            if (rangoEdit) {
+              queryTms = queryTms.gte("Fecha", rangoEdit.ini).lt("Fecha", rangoEdit.fin);
+            }
+            const { data: tms } = await queryTms;
 
             const segTM = (tms || []).reduce((acc, tm) => {
               if (!tm.Hora_Inicio || !tm.Hora_Fin) return acc;
@@ -1109,7 +1134,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (tsParaDia) {
         const dateInfo = dateFromISO(tsParaDia);
         if (dateInfo.dia && dateInfo.mes) {
-          await recalcularCajonesDelDia(editingLeg, dateInfo.dia, dateInfo.mes);
+          await recalcularCajonesDelDia(editingLeg, dateInfo.dia, dateInfo.mes, dateInfo.anio);
         }
       }
     }
@@ -1391,13 +1416,6 @@ document.addEventListener("DOMContentLoaded", () => {
             { label: "Cpo Sacacorcho SIN Marca", matriz: "39B", nombre: "Cerrado Cuerpo Sacacorcho (Sin Marca)" },
           ],
         },
-        "21": {
-          pregunta: "Matriz 21 - Selecciona el tipo:",
-          opciones: [
-            { label: "Loeke",     matriz: "21", nombre: "Destapacorona Loeke" },
-            { label: "Sin Marca", matriz: "21B", nombre: "Destapacorona Sin Marca" },
-          ],
-        },
         "79": {
           pregunta: "Matriz 79 - Corte Destapacorona:",
           opciones: [
@@ -1438,8 +1456,14 @@ document.addEventListener("DOMContentLoaded", () => {
           _nombreMatrizOverride = varianteElegida.nombre;
         }
       }
+      if (!matricesMap.has(texto)) {
+        alert(`La matriz ${texto} no existe. Verifica el numero.`);
+        _varianteYaElegida = false;
+        _nombreMatrizOverride = null;
+        return;
+      }
       const matCheck = matricesMap.get(texto);
-      if (matCheck && (Number(matCheck.Tiempo_Promedio) === 0 || matCheck.Tiempo_Promedio === null)) {
+      if (matCheck && (Number(matCheck.Tiempo_Historico) === 0 || matCheck.Tiempo_Historico === null)) {
         const emp = empleadosMap.get(String(legajo).trim());
         const nombre = emp?.Empleado || "Legajo " + legajo;
         enviarAlertaWA({
