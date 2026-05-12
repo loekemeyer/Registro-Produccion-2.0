@@ -1391,13 +1391,6 @@ document.addEventListener("DOMContentLoaded", () => {
             { label: "Cpo Sacacorcho SIN Marca", matriz: "39B", nombre: "Cerrado Cuerpo Sacacorcho (Sin Marca)" },
           ],
         },
-        "21": {
-          pregunta: "Matriz 21 - Selecciona el tipo:",
-          opciones: [
-            { label: "Loeke",     matriz: "21", nombre: "Destapacorona Loeke" },
-            { label: "Sin Marca", matriz: "21B", nombre: "Destapacorona Sin Marca" },
-          ],
-        },
         "79": {
           pregunta: "Matriz 79 - Corte Destapacorona:",
           opciones: [
