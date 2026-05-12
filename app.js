@@ -580,7 +580,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const matNum = String(item.matriz || "").trim();
       const matInfo = matricesMap.get(matNum);
       const nombreMatriz = matInfo?.Matriz || "";
-      const tiempoPromedio = Number(matInfo?.Tiempo_Promedio || 0);
+      const tiempoPromedio = Number(matInfo?.Tiempo_Historico || 0);
 
       // FIX Bug 501: reemplazar coma por punto antes de Number()
       const uni = esCajon ? Number(String(item.texto || 0).replace(",", ".")) : 0;
@@ -998,7 +998,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const uni = Number(String(texto).replace(",", ".")) || 0;
             const matNum = String(item.matriz || "").trim();
             const matInfo = matricesMap.get(matNum);
-            const tProm = Number(matInfo?.Tiempo_Promedio || 0);
+            const tProm = Number(matInfo?.Tiempo_Historico || 0);
             const segHist = tProm * uni;
 
             const horaInicio = fila?.Hora_Inicio || timeFromISO(item.hsInicio || item.ts);
@@ -1439,7 +1439,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       }
       const matCheck = matricesMap.get(texto);
-      if (matCheck && (Number(matCheck.Tiempo_Promedio) === 0 || matCheck.Tiempo_Promedio === null)) {
+      if (matCheck && (Number(matCheck.Tiempo_Historico) === 0 || matCheck.Tiempo_Historico === null)) {
         const emp = empleadosMap.get(String(legajo).trim());
         const nombre = emp?.Empleado || "Legajo " + legajo;
         enviarAlertaWA({
