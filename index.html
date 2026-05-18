@@ -16,7 +16,7 @@
 </head>
 <body>
 
-  <div id="syncBadge" title="Tocar para forzar envio" style="position:fixed;bottom:6px;left:8px;font-size:12px;font-weight:800;z-index:100;cursor:pointer;padding:4px 10px;border-radius:999px;user-select:none;background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;">v1.7 &#10003;</div>
+  <div id="syncBadge" title="Tocar para forzar envio" style="position:fixed;bottom:6px;left:8px;font-size:12px;font-weight:800;z-index:100;cursor:pointer;padding:4px 10px;border-radius:999px;user-select:none;background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;">v1.8.16 &#10003;</div>
 
   <!-- LEGAJO -->
   <div id="legajoScreen">
@@ -33,10 +33,12 @@
       <div class="pending-title">Pendientes en cola (este dispositivo)</div>
       <div id="pendingList" class="pending-list"></div>
     </div>
+
   </div>
 
   <!-- OPCIONES -->
   <div id="optionsScreen" class="hidden">
+    <button id="btnTerminarDia" style="position:fixed;top:10px;right:10px;width:auto;padding:8px 14px;font-size:14px;font-weight:bold;background:#dc2626;color:#fff;border:2px solid #991b1b;border-radius:8px;cursor:pointer;margin:0;line-height:1;z-index:50;">Terminar Día</button>
     <div class="top-bar">
       <div id="btnBackTop" class="back-top">&larr;</div>
       <div id="btnBackLabel" class="back-label">Volver a pantalla inicial</div>
@@ -91,6 +93,20 @@
       <div class="edit-modal-footer">
         <button class="edit-btn edit-btn-cancel" id="editCancel">Cancelar</button>
         <button class="edit-btn edit-btn-save" id="editSave">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL TERMINAR DIA -->
+  <div id="terminarDiaModal" class="td-modal hidden">
+    <div class="td-modal-card">
+      <div class="td-modal-header">
+        <span class="td-modal-title">Terminar día</span>
+        <button class="td-modal-close" id="btnCancelTD">Cancelar</button>
+      </div>
+      <div class="td-modal-body" id="terminarDiaContent"></div>
+      <div class="td-modal-footer">
+        <button id="btnConfirmTD" class="td-confirm-btn">Sí, terminar día</button>
       </div>
     </div>
   </div>

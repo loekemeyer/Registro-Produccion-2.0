@@ -1,12 +1,4 @@
-const CACHE_VERSION = "v1.7";
-const CACHE_NAME = `registro-cache-${CACHE_VERSION}`;
-const STATIC_ASSETS = [
-  "./",
-  "./index.html",
-  "./app.js",
-  "./styles.css",
-  "./manifest.json"
-];
+const CACHE_VERSION = "v1.8.16";
 
 const SUPABASE_URL = "https://hrxfctzncixxqmpfhskv.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhyeGZjdHpuY2l4eHFtcGZoc2t2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MjQyNjEsImV4cCI6MjA4ODMwMDI2MX0.4L6wguch8UZGhC2VpzrWcCjJGUV-IkYsl9JoCWrOLUs";
@@ -93,72 +85,45 @@ async function processQueueInBackground() {
   if (anyFailed) throw new Error("Algunos items quedaron pendientes");
 }
 
-self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(STATIC_ASSETS))
-      .then(() => self.skipWaiting())
-  );
+// Patron Virgilio: el SW NO cachea estaticos. Solo background sync.
+// Asi el browser siempre recibe el HTML/CSS/JS fresco desde la red
+// (con su propio HTTP cache, no el del SW) y no quedan operarios
+// con versiones viejas pegadas en cache cuando hacemos deploy.
+self.addEventListener("install", () => {
+  self.skipWaiting();
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    (async () => {
+  event.waitUntil((async () => {
+    // Borrar cualquier cache viejo de versiones previas que SI cacheaban
+    try {
       const names = await caches.keys();
-      await Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)));
-      await self.clients.claim();
-      // Forzar reload de tabs abiertas para cargar nueva version del JS.
-      // navigate() funciona sin necesidad de listener en el cliente viejo.
-      const clients = await self.clients.matchAll({ type: "window" });
+      await Promise.all(names.map((n) => caches.delete(n)));
+    } catch {}
+    await self.clients.claim();
+    // Avisar a paginas abiertas con SW viejo (v1.8.x) para que recarguen
+    try {
+      const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       for (const client of clients) {
-        try { await client.navigate(client.url); } catch { /* ignore */ }
-        // Fallback: si navigate falla (e.g. cross-origin), enviar mensaje
         try { client.postMessage({ type: "SW_UPDATED", version: CACHE_VERSION }); } catch {}
       }
-    })()
-  );
+    } catch {}
+  })());
 });
 
-self.addEventListener("fetch", (event) => {
-  const req = event.request;
-  if (req.method !== "GET") return;
-
-  const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return;
-
-  const isHTML = req.mode === "navigate" ||
-                 (req.headers.get("accept") || "").includes("text/html");
-
-  if (isHTML) {
-    event.respondWith(
-      fetch(req)
-        .then((response) => {
-          if (response && response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
-          }
-          return response;
-        })
-        .catch(() => caches.match(req).then((c) => c || caches.match("./")))
-    );
-  } else {
-    event.respondWith(
-      caches.match(req).then((cached) => {
-        if (cached) return cached;
-        return fetch(req).then((response) => {
-          if (response && response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
-          }
-          return response;
-        });
-      })
-    );
-  }
-});
+// Fetch handler vacio (mismo patron que Virgilio). El browser maneja
+// todo via su HTTP cache normal. Algunos navegadores necesitan que
+// el SW tenga un handler de fetch para considerarlo "completo".
+self.addEventListener("fetch", () => {});
 
 self.addEventListener("sync", (event) => {
   if (event.tag === "flush-queue") {
     event.waitUntil(processQueueInBackground());
+  }
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
   }
 });

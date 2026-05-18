@@ -81,9 +81,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
   /* ================= TIEMPO ================= */
   function isoNow() {
-    const d = new Date();
-    d.setMilliseconds(0);
-    return d.toISOString();
+    // Precision de milisegundos: la columna ts_event en Supabase es timestamptz(6)
+    // y aceptaba ms, pero antes redondeabamos a segundos perdiendo orden cuando
+    // varios eventos cierran al mismo segundo (ej: close-TM + FJ en Terminar Dia).
+    return new Date().toISOString();
   }
 
   function formatDateTimeAR(iso) {
@@ -168,6 +169,7 @@ document.addEventListener("DOMContentLoaded", () => {
       s.lastCajon = s.lastCajon || null;
       s.lastDowntime = s.lastDowntime || null;
       s.matrixNeedsC = !!s.matrixNeedsC;
+      s.tdCajonPending = s.tdCajonPending || null;
       return s;
     } catch { return freshState(); }
   }
@@ -325,17 +327,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const q = readQueue();
     const failed = q.filter(x => (x.__tries || 0) > 0).length;
     if (q.length === 0) {
-      badge.textContent = "v1.7 ✓";
+      badge.textContent = "v1.8.16 ✓";
       badge.style.background = "#f0fdf4";
       badge.style.color = "#166534";
       badge.style.borderColor = "#bbf7d0";
     } else if (failed > 0) {
-      badge.textContent = `v1.7 ⚠ ${q.length}`;
+      badge.textContent = `v1.8.16 ⚠ ${q.length}`;
       badge.style.background = "#fef2f2";
       badge.style.color = "#991b1b";
       badge.style.borderColor = "#fecaca";
     } else {
-      badge.textContent = `v1.7 ⏳ ${q.length}`;
+      badge.textContent = `v1.8.16 ⏳ ${q.length}`;
       badge.style.background = "#fffbeb";
       badge.style.color = "#92400e";
       badge.style.borderColor = "#fde68a";
@@ -836,19 +838,23 @@ document.addEventListener("DOMContentLoaded", () => {
       <div class="day-item">
         <div class="t1">Historial del dia (${s.last2.length})</div>
         <div class="t2" style="max-height:360px;overflow:auto;">
-          ${s.last2.map((it, idx) => `
+          ${s.last2.map((it, idx) => {
+            const isFJ = it.opcion === "FJ";
+            const showTexto = !isFJ && it.texto;
+            return `
             <div style="margin-top:10px;padding-bottom:10px;border-bottom:1px solid rgba(0,0,0,.08);" data-hist-idx="${idx}">
               <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                <span style="font-weight:900;font-size:34px;">${it.opcion}${it.texto ? `: ${it.texto}` : ""}</span>
+                <span style="font-weight:900;font-size:34px;">${it.opcion}${showTexto ? `: ${it.texto}` : ""}</span>
                 ${badge(it.status)}
-                <span class="hist-btn hist-edit" data-idx="${idx}" title="Editar">&#9998;</span>
-                <span class="hist-btn hist-del" data-idx="${idx}" title="Eliminar">&#128465;</span>
+                ${isFJ ? "" : `<span class="hist-btn hist-edit" data-idx="${idx}" title="Editar">&#9998;</span>`}
+                ${isFJ ? "" : `<span class="hist-btn hist-del" data-idx="${idx}" title="Eliminar">&#128465;</span>`}
               </div>
               ${it.ts ? `<div style="color:#555;">Evento: ${formatDateTimeAR(it.ts)}</div>` : ""}
               ${it.sentAt ? `<div style="color:#0b6b2c;">Enviado: ${formatDateTimeAR(it.sentAt)}</div>` : ""}
               ${it.lastError ? `<div style="color:#9b1c1c;font-size:12px;">${it.lastError}</div>` : ""}
             </div>
-          `).join("")}
+          `;
+          }).join("")}
         </div>
       </div>`;
 
@@ -1632,9 +1638,11 @@ document.addEventListener("DOMContentLoaded", () => {
         items.forEach(it => {
           const statusColor = it.status === "sent" ? "#0b6b2c" : it.status === "failed" ? "#9b1c1c" : "#8a5a00";
           const statusText = it.status === "sent" ? "ENVIADO" : it.status === "failed" ? "ERROR" : "PENDIENTE";
+          const isFJ = it.opcion === "FJ";
+          const showTexto = !isFJ && it.texto;
           const row = document.createElement("div");
           row.style.cssText = "padding:10px 0;border-bottom:1px solid #f3f4f6;font-size:18px";
-          row.innerHTML = `<span style="font-weight:700">${it.opcion}${it.texto ? ": " + it.texto : ""}</span> <span style="color:${statusColor};font-size:13px;font-weight:800">${statusText}</span> <span style="color:#888;font-size:14px">${safeTime(it.ts)}</span>`;
+          row.innerHTML = `<span style="font-weight:700">${it.opcion}${showTexto ? ": " + it.texto : ""}</span> <span style="color:${statusColor};font-size:13px;font-weight:800">${statusText}</span> <span style="color:#888;font-size:14px">${safeTime(it.ts)}</span>`;
           listContainer.appendChild(row);
         });
       };
@@ -1667,19 +1675,290 @@ document.addEventListener("DOMContentLoaded", () => {
     document.body.appendChild(overlay);
   });
 
+  /* ================= TERMINAR DIA ================= */
+  const btnTerminarDia = $("btnTerminarDia");
+  const terminarDiaModal = $("terminarDiaModal");
+  const terminarDiaContent = $("terminarDiaContent");
+  const btnCancelTD = $("btnCancelTD");
+  const btnConfirmTD = $("btnConfirmTD");
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function getTodaySummaryForLegajo(legajo) {
+    const state = readState(legajo);
+    const counts = {};
+    let total = 0;
+    for (const it of state.last2) {
+      if (it.opcion === "FJ") continue;
+      counts[it.opcion] = (counts[it.opcion] || 0) + 1;
+      total++;
+    }
+    return { total, counts };
+  }
+
+  async function bulkSendDayReplay(legajoStr, snapshot) {
+    const payloads = (snapshot || [])
+      .filter(it => it && it.id && it.opcion !== "FJ")
+      .map(it => ({
+        id: it.id,
+        legajo: legajoStr,
+        opcion: it.opcion,
+        descripcion: it.descripcion || (OPTIONS.find(o => o.code === it.opcion)?.desc) || "",
+        texto: it.texto || "",
+        ts_event: it.ts,
+        hs_inicio: it.hsInicio || "",
+        matriz: it.matriz || ""
+      }));
+    if (!payloads.length) return { ok: true, count: 0 };
+    try {
+      const { error } = await sb.from(TABLA_REGISTROS).upsert(payloads, { onConflict: "id", ignoreDuplicates: true });
+      if (error) throw error;
+      return { ok: true, count: payloads.length };
+    } catch (err) {
+      console.warn("[bulkReplay] error:", err.message || err);
+      return { ok: false, count: payloads.length, error: err.message || String(err) };
+    }
+  }
+
+  function terminarDia() {
+    const legajoStr = legajoKey();
+    if (!legajoStr) { alert("Falta el numero de legajo"); return; }
+
+    const state = readState(legajoStr);
+    const summary = getTodaySummaryForLegajo(legajoStr);
+    const lastDowntime = state.lastDowntime;
+    const lastMatrix = state.lastMatrix;
+    const prevFJ = state.last2.find(it => it.opcion === "FJ");
+
+    let html = "";
+
+    if (prevFJ) {
+      html += '<div class="td-fj-warn"><b>⚠ Ya cerraste el día hoy.</b><br>Si confirmás, se reemplaza el reporte anterior.</div>';
+    }
+
+    html += '<div class="td-section">';
+    html += `<div><b>Legajo:</b> ${escapeHtml(legajoStr)}</div>`;
+    html += `<div><b>Eventos hoy:</b> ${summary.total}</div>`;
+    const opciones = Object.keys(summary.counts).sort();
+    if (opciones.length) {
+      html += "<ul>";
+      for (const op of opciones) {
+        const desc = OPTIONS.find(o => o.code === op)?.desc || "";
+        html += `<li><b>${escapeHtml(op)}</b>${desc ? " — " + escapeHtml(desc) : ""}: ${summary.counts[op]}</li>`;
+      }
+      html += "</ul>";
+    } else {
+      html += '<div style="color:#777;">Sin reportes hoy.</div>';
+    }
+    html += '</div>';
+
+    if (lastDowntime) {
+      const tmDesc = OPTIONS.find(o => o.code === lastDowntime.opcion)?.desc || "";
+      html += '<div class="td-warn-tm">';
+      html += '<div class="td-warn-tm-title">⛔ Tiempo Muerto abierto</div>';
+      html += `<div>Se cierra automáticamente: <b>${escapeHtml(lastDowntime.opcion)}</b>${tmDesc ? " — " + escapeHtml(tmDesc) : ""}${lastDowntime.texto ? ` (a ${escapeHtml(lastDowntime.texto)})` : ""}</div>`;
+      html += '</div>';
+    }
+
+    // Cajon extra: solo se ofrece si hay matriz en uso Y no se encolo uno
+    // en un intento previo de TD. En el reintento, el cajon ya esta en
+    // last2 y reflejado en el summary de arriba + va al bulk replay + al
+    // conteo del FJ, asi que mostrar la seccion otra vez es redundante y
+    // confuso (operario podria pensar que hace falta repetirlo).
+    if (lastMatrix && lastMatrix.texto && !state.tdCajonPending) {
+      const matDesc = lastMatrix.nombreOverride || (matricesMap.get(lastMatrix.texto)?.Matriz || "");
+      const isPiedra = String(lastMatrix.texto).trim() === "501";
+      html += '<div class="td-cajon-extra">';
+      html += '<div class="td-cajon-extra-title">📦 ¿Hiciste otro cajón sin enviar?</div>';
+      html += `<div>Matriz en uso: <b>${escapeHtml(lastMatrix.texto)}</b>${matDesc ? " — " + escapeHtml(matDesc) : ""}</div>`;
+      html += '<div style="font-size:13px;color:#666;margin-top:4px;">Si hiciste otro cajón después del último envío, escribí la cantidad. Si no, dejalo vacío.</div>';
+      html += `<input type="text" id="td_cajon_extra" class="td-cajon-extra-input" inputmode="${isPiedra ? "decimal" : "numeric"}" placeholder="${isPiedra ? "Cantidad (ej: 12,5)" : "Cantidad"}">`;
+      html += '</div>';
+    }
+
+    terminarDiaContent.innerHTML = html;
+    terminarDiaModal.classList.remove("hidden");
+  }
+
+  function closeTerminarDia() {
+    terminarDiaModal.classList.add("hidden");
+  }
+
+  async function confirmarTerminarDia() {
+    const legajoStr = legajoKey();
+    if (!legajoStr) { closeTerminarDia(); return; }
+
+    if (btnConfirmTD) { btnConfirmTD.disabled = true; btnConfirmTD.textContent = "Procesando..."; }
+
+    try {
+      const stateBefore = readState(legajoStr);
+
+      let cajonExtraValue = null;
+      const cajonExtraInput = document.getElementById("td_cajon_extra");
+      if (cajonExtraInput) {
+        const v = (cajonExtraInput.value || "").trim();
+        if (v) {
+          const isPiedra = String(stateBefore.lastMatrix?.texto || "").trim() === "501";
+          const re = isPiedra ? /^\d+(?:[.,]\d+)?$/ : /^[0-9]+$/;
+          if (!re.test(v)) {
+            alert(isPiedra ? "Para piedra (501): usar coma o punto (ej: 12,5)" : "Solo se permiten numeros enteros");
+            if (btnConfirmTD) { btnConfirmTD.disabled = false; btnConfirmTD.textContent = "Sí, terminar día"; }
+            return;
+          }
+          cajonExtraValue = isPiedra ? v.replace(/\./g, ",") : v;
+        }
+      }
+
+      // 1) Bulk replay snapshot del día (best-effort, idempotente)
+      const replayRes = await bulkSendDayReplay(legajoStr, stateBefore.last2);
+
+      // 2) Cerrar TM abierto si lo hay
+      if (stateBefore.lastDowntime) {
+        const ld = stateBefore.lastDowntime;
+        const closePayload = {
+          id: uuidv4(),
+          legajo: legajoStr,
+          opcion: ld.opcion,
+          descripcion: OPTIONS.find(o => o.code === ld.opcion)?.desc || "",
+          texto: ld.texto || "",
+          ts_event: isoNow(),
+          hs_inicio: ld.ts || "",
+          matriz: ""
+        };
+        updateStateAfterSend(legajoStr, closePayload);
+        enqueue(closePayload);
+      }
+
+      // 3) Cajón extra opcional. Si tdCajonPending ya esta seteado, significa
+      //    que en un intento previo de TD se encolo el cajon pero el FJ fallo;
+      //    no re-encolar (evita duplicados en Supabase). El flag se limpia al
+      //    confirmar exitosamente (paso 6).
+      if (cajonExtraValue && !stateBefore.tdCajonPending) {
+        const stateNow = readState(legajoStr);
+        if (stateNow.lastMatrix?.texto) {
+          const cajonPayload = {
+            id: uuidv4(),
+            legajo: legajoStr,
+            opcion: "C",
+            descripcion: "Cajon",
+            texto: cajonExtraValue,
+            ts_event: isoNow(),
+            hs_inicio: computeHsInicio(stateNow),
+            matriz: stateNow.lastMatrix.texto
+          };
+          if (stateNow.lastMatrix.nombreOverride) {
+            cajonPayload.nombreOverride = stateNow.lastMatrix.nombreOverride;
+          }
+          updateStateAfterSend(legajoStr, cajonPayload);
+          enqueue(cajonPayload);
+          // Marcar como pendiente: si el FJ falla y reintenta, no encolamos otro
+          const sMark = readState(legajoStr);
+          sMark.tdCajonPending = cajonExtraValue;
+          writeState(legajoStr, sMark);
+        }
+      }
+
+      // 4) FJ con id deterministico (upsert merge para overwrite si ya existe)
+      const summaryFinal = getTodaySummaryForLegajo(legajoStr);
+      const fjId = `fj_${legajoStr}_${dayKeyAR()}`;
+      const fjTs = isoNow();
+      const fjPayload = {
+        id: fjId,
+        legajo: legajoStr,
+        opcion: "FJ",
+        descripcion: "Fin de Jornada",
+        texto: JSON.stringify(summaryFinal.counts),
+        ts_event: fjTs,
+        hs_inicio: "",
+        matriz: ""
+      };
+
+      try {
+        const { error } = await sb.from(TABLA_REGISTROS).upsert(fjPayload, { onConflict: "id" });
+        if (error) {
+          alert("Error al enviar el cierre del día: " + error.message);
+          if (btnConfirmTD) { btnConfirmTD.disabled = false; btnConfirmTD.textContent = "Sí, terminar día"; }
+          return;
+        }
+      } catch (err) {
+        alert("Error de red al enviar el cierre del día. Intentá de nuevo.");
+        if (btnConfirmTD) { btnConfirmTD.disabled = false; btnConfirmTD.textContent = "Sí, terminar día"; }
+        return;
+      }
+
+      // Reflejar FJ en el historial local (reemplaza FJ anterior si había)
+      const sFinal = readState(legajoStr);
+      sFinal.last2 = sFinal.last2.filter(it => it.opcion !== "FJ");
+      sFinal.last2.unshift({
+        id: fjId, legajo: legajoStr, opcion: "FJ", descripcion: "Fin de Jornada",
+        texto: fjPayload.texto, ts: fjTs, hsInicio: "", matriz: "",
+        status: "sent", sentAt: fjTs
+      });
+      // FJ OK: limpiar el flag de cajon pendiente. Proximo TD (si reabre el
+      // modal mas tarde el mismo dia) vuelve a mostrar el input fresco.
+      sFinal.tdCajonPending = null;
+      writeState(legajoStr, sFinal);
+
+      // 5) Forzar flush de la cola (TM cerrado / cajon extra) con deadline 10s.
+      //    Si tarda mas, completamos TD igual; los eventos quedan en IDB y
+      //    siguen reintentando solos via background sync / flush automatico.
+      await Promise.race([
+        flushQueue(),
+        new Promise(resolve => setTimeout(resolve, 10000))
+      ]);
+
+      // 6) Avisar al operario si quedo algo pendiente (red intermitente)
+      const pendingAfter = readQueue().length;
+      const partes = [];
+      if (pendingAfter > 0) partes.push(`${pendingAfter} evento${pendingAfter > 1 ? "s" : ""} en cola`);
+      if (!replayRes.ok && replayRes.count > 0) partes.push("re-envio del dia incompleto");
+      if (partes.length) {
+        alert(`Tu cierre del dia se grabo OK, pero ${partes.join(" y ")}. Se reintentara automaticamente cuando haya red.`);
+      }
+
+      // 7) Cerrar modal y volver a pantalla de legajo
+      closeTerminarDia();
+      backToLegajo();
+    } finally {
+      if (btnConfirmTD) { btnConfirmTD.disabled = false; btnConfirmTD.textContent = "Sí, terminar día"; }
+    }
+  }
+
   /* ================= EVENTOS ================= */
   btnContinuar.addEventListener("click", goToOptions);
   btnBackTop.addEventListener("click", backToLegajo);
   btnBackLabel.addEventListener("click", backToLegajo);
   btnResetSelection.addEventListener("click", resetSelection);
   btnEnviar.addEventListener("click", sendFast);
+  if (btnTerminarDia) btnTerminarDia.addEventListener("click", terminarDia);
+  if (btnCancelTD) btnCancelTD.addEventListener("click", closeTerminarDia);
+  if (btnConfirmTD) btnConfirmTD.addEventListener("click", confirmarTerminarDia);
+  if (terminarDiaModal) terminarDiaModal.addEventListener("click", (e) => {
+    if (e.target === terminarDiaModal) closeTerminarDia();
+  });
 
   const syncBadgeEl = document.getElementById("syncBadge");
   if (syncBadgeEl) {
-    syncBadgeEl.addEventListener("click", () => {
+    syncBadgeEl.addEventListener("click", async () => {
       syncBadgeEl.style.transform = "scale(0.92)";
       setTimeout(() => { syncBadgeEl.style.transform = ""; }, 120);
       flushQueue();
+      if ("serviceWorker" in navigator) {
+        try {
+          const reg = await navigator.serviceWorker.getRegistration();
+          if (reg) {
+            await reg.update().catch(() => {});
+            // Si hay SW esperando, decirle que tome el control ya
+            if (reg.waiting) {
+              reg.waiting.postMessage({ type: "SKIP_WAITING" });
+            }
+          }
+        } catch {}
+      }
     });
   }
   legajoInput.addEventListener("keydown", e => { if (e.key === "Enter") goToOptions(); });
@@ -1700,22 +1979,157 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   setInterval(() => flushQueue(), 3000);
 
+  /* ================= LOG SW (debug visible en celu) ================= */
+  const SW_LOG_KEY = "sw_log_v1";
+  function swLog(msg) {
+    const ts = new Date().toLocaleTimeString("es-AR", {
+      timeZone: "America/Argentina/Buenos_Aires",
+      hour: "2-digit", minute: "2-digit", second: "2-digit"
+    });
+    const line = `[${ts}] ${msg}`;
+    console.log("[SW LOG]", line);
+    try {
+      const arr = JSON.parse(localStorage.getItem(SW_LOG_KEY) || "[]");
+      arr.push(line);
+      localStorage.setItem(SW_LOG_KEY, JSON.stringify(arr.slice(-100)));
+    } catch {}
+    renderSwLog();
+  }
+  function renderSwLog() {
+    const el = document.getElementById("swLog");
+    if (!el) return;
+    try {
+      const arr = JSON.parse(localStorage.getItem(SW_LOG_KEY) || "[]");
+      if (!arr.length) { el.innerHTML = '<div style="color:#9ca3af;">(sin eventos)</div>'; return; }
+      const esc = (s) => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+      el.innerHTML = arr.slice(-40).reverse().map(l => `<div>${esc(l)}</div>`).join("");
+    } catch {}
+  }
+  const btnClearSwLog = document.getElementById("btnClearSwLog");
+  if (btnClearSwLog) btnClearSwLog.addEventListener("click", () => {
+    try { localStorage.removeItem(SW_LOG_KEY); } catch {}
+    renderSwLog();
+  });
+  renderSwLog();
+
+  // Capturar errores globales en el log
+  window.addEventListener("error", (e) => {
+    try { swLog(`JS error: ${e.message || "?"} @ ${e.filename || "?"}:${e.lineno || "?"}`); } catch {}
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    try {
+      const reason = e.reason;
+      const msg = (reason && reason.message) || String(reason || "?");
+      swLog(`Promise rejection: ${msg}`);
+    } catch {}
+  });
+
+  swLog(`Pagina cargada (v1.8.16)`);
+
   /* ================= SERVICE WORKER ================= */
+  const LOCAL_VERSION = "v1.8.16";
+  let __swReloading = false;
+
+  // Brave Android ignora updateViaCache:"none" y devuelve sw.js cacheado
+  // en cada reg.update(), asi que nunca dispara updatefound. Fix:
+  // fetch manual con cache-buster + comparar CACHE_VERSION + reload si cambio.
+  // El reload triggerea un registro fresh de SW que SI funciona.
+  //
+  // Anti-loop: el CDN puede tener sw.js nuevo pero app.js viejo cacheado.
+  // Si recargamos por update hace <60s y todavia vemos mismatch, NO recargar
+  // (significa que el deploy esta a mitad de propagar - esperar al proximo check).
+  const UPDATE_RELOAD_KEY = "__lastUpdateReload";
+  const RELOAD_COOLDOWN_MS = 60000;
+  async function checkForUpdateManual() {
+    try {
+      const res = await fetch(`sw.js?_t=${Date.now()}`, { cache: "no-store" });
+      if (!res.ok) { swLog(`check manual HTTP ${res.status}`); return; }
+      const txt = await res.text();
+      const m = txt.match(/CACHE_VERSION\s*=\s*["']([^"']+)["']/);
+      if (!m) { swLog("check manual: no se encontro CACHE_VERSION"); return; }
+      const remote = m[1];
+      swLog(`check manual: local=${LOCAL_VERSION} remote=${remote}`);
+      if (remote === LOCAL_VERSION || __swReloading) return;
+
+      const lastReload = parseInt(sessionStorage.getItem(UPDATE_RELOAD_KEY) || "0", 10);
+      const sinceMs = Date.now() - lastReload;
+      if (lastReload > 0 && sinceMs < RELOAD_COOLDOWN_MS) {
+        swLog(`Update ${LOCAL_VERSION}->${remote} pero ya recargamos hace ${Math.round(sinceMs/1000)}s (CDN a mitad de deploy), espero`);
+        return;
+      }
+      __swReloading = true;
+      sessionStorage.setItem(UPDATE_RELOAD_KEY, String(Date.now()));
+      swLog(`Update detectado ${LOCAL_VERSION} -> ${remote}, reload`);
+      setTimeout(() => window.location.reload(), 300);
+    } catch (e) {
+      swLog(`check manual error: ${(e && e.message) || e}`);
+    }
+  }
+
   if ("serviceWorker" in navigator) {
+    swLog("serviceWorker disponible - iniciando registro");
+
+    // Si la pagina cargo SIN controller (primer registro de SW en este origin),
+    // el controllerchange que viene cuando el SW toma control por primera vez
+    // NO es un update real - es solo "ahora hay SW". Skipear el reload en ese
+    // caso evita 2-3 reloads consecutivos al primer load del operario.
+    const __hadInitialController = !!navigator.serviceWorker.controller;
+
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      swLog(`controllerchange (ctrl=${navigator.serviceWorker.controller ? "si" : "no"})`);
+      if (!__hadInitialController) {
+        swLog("primer registro de SW - no recargar");
+        return;
+      }
+      if (__swReloading) return;
+      __swReloading = true;
+      swLog("Reload por controllerchange");
+      setTimeout(() => window.location.reload(), 300);
+    });
+
     navigator.serviceWorker.register("sw.js", { updateViaCache: "none" })
       .then((reg) => {
-        console.log("SW registrado", reg.scope);
-        setInterval(() => { reg.update().catch(() => {}); }, 60000);
-      })
-      .catch((err) => console.warn("SW no se pudo registrar:", err));
+        swLog(`SW register OK scope=${reg.scope}`);
+        if (reg.installing) swLog("Al cargar: hay SW instalando");
+        if (reg.waiting)    swLog("Al cargar: hay SW waiting - envio SKIP_WAITING");
+        if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+        if (reg.active)     swLog(`Al cargar: SW activo (state=${reg.active.state})`);
 
-    // Cuando llega mensaje de SW activado nuevo, recargar para tomar nuevo JS
+        reg.addEventListener("updatefound", () => {
+          const nw = reg.installing;
+          swLog(`updatefound (installing=${nw ? nw.state : "null"})`);
+          if (!nw) return;
+          nw.addEventListener("statechange", () => {
+            swLog(`SW nuevo state=${nw.state}`);
+            if (nw.state === "installed" && navigator.serviceWorker.controller) {
+              swLog("Envio SKIP_WAITING al SW nuevo");
+              nw.postMessage({ type: "SKIP_WAITING" });
+            }
+          });
+        });
+      })
+      .catch((err) => {
+        swLog(`Error registrando SW: ${(err && err.message) || err}`);
+        console.warn("SW no se pudo registrar:", err);
+      });
+
     navigator.serviceWorker.addEventListener("message", (event) => {
-      if (event.data && event.data.type === "SW_UPDATED") {
-        console.log("[SW] Nueva version", event.data.version, "- recargando...");
-        window.location.reload();
+      const d = event.data || {};
+      if (d.type === "SW_UPDATED") {
+        swLog(`SW_UPDATED recibido v=${d.version} - reload`);
+        if (__swReloading) return;
+        __swReloading = true;
+        setTimeout(() => window.location.reload(), 300);
       }
     });
+
+    setInterval(checkForUpdateManual, 60000);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") checkForUpdateManual();
+    });
+    checkForUpdateManual();
+  } else {
+    swLog("serviceWorker NO disponible en este browser");
   }
 
   /* ================= INIT ================= */
@@ -1731,7 +2145,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderSummary();
     renderPending();
     updateSyncBadge();
-    console.log("app.js OK - v1.7");
+    console.log("app.js OK - v1.8.16");
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
