@@ -1326,7 +1326,7 @@ document.addEventListener("DOMContentLoaded", () => {
       s.matrixNeedsC = false;
       writeState(legajo, s); return;
     }
-    if (["RM", "PM", "RD"].includes(payload.opcion)) {
+    if (["RM", "PM", "RD", "LT"].includes(payload.opcion)) {
       s.lastDowntime = null;
       writeState(legajo, s); return;
     }
