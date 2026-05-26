@@ -1404,7 +1404,7 @@ document.addEventListener("DOMContentLoaded", () => {
           pregunta: "Matriz 3 - Mango Pelador:",
           opciones: [
             { label: "Con Marca", matriz: "3", nombre: "Mango Pelador Con Marca" },
-            { label: "Sin Marca", matriz: "3", nombre: "Mango Pelador Sin Marca" },
+            { label: "Sin Marca", matriz: "3B", nombre: "Mango Pelador Sin Marca" },
           ],
         },
         "12": {
