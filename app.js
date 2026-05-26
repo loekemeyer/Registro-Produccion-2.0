@@ -1400,6 +1400,13 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       // 8 matrices con variante
       const MATRICES_CON_VARIANTE = {
+        "3": {
+          pregunta: "Matriz 3 - Mango Pelador:",
+          opciones: [
+            { label: "Con Marca", matriz: "3", nombre: "Mango Pelador Con Marca" },
+            { label: "Sin Marca", matriz: "3", nombre: "Mango Pelador Sin Marca" },
+          ],
+        },
         "12": {
           pregunta: "Doblado Mango Plano - Selecciona el tipo:",
           opciones: [
