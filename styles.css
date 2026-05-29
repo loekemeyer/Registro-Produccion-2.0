@@ -109,3 +109,63 @@ button{
 .td-cajon-extra-title{font-weight:700;color:#854d0e;font-size:14px;margin-bottom:4px;}
 .td-cajon-extra-input{width:100%;height:44px;padding:0 12px;font-size:16px;border:1px solid #d1d5db;border-radius:8px;margin-top:8px;box-sizing:border-box;}
 .td-fj-warn{padding:10px;background:#fef9c3;border:1px solid #ca8a04;border-radius:8px;font-size:13px;color:#854d0e;margin-bottom:12px;}
+
+/* ================= BOTON CONTINUAR CAJON en row1 (v1.8.26) ================= */
+/* Aparece a la derecha de C en row1 cuando el legajo eligio "SI sigo manana" en TD ayer */
+.row.row-3{grid-template-columns:1fr 1fr 1fr !important;}
+.box.box-cont{
+  background:linear-gradient(180deg,#22c55e 0%,#16a34a 100%) !important;
+  color:#fff !important;
+  border:3px solid #15803d !important;
+  box-shadow:0 4px 14px rgba(22,163,74,0.55);
+  animation:bannerPulse 1.6s ease-in-out infinite;
+}
+.box.box-cont .box-title{color:#fff !important;font-weight:900;}
+.box.box-cont .box-desc{color:#dcfce7 !important;font-weight:600;font-size:12px;}
+.box.box-cont:hover{transform:scale(1.02);}
+@keyframes bannerPulse{
+  0%,100%{box-shadow:0 4px 14px rgba(22,163,74,0.55);}
+  50%{box-shadow:0 4px 22px rgba(22,163,74,0.95),0 0 8px rgba(34,197,94,0.6) inset;}
+}
+
+/* ================= FORM CONTINUACION en MODAL TD (v1.8.25) ================= */
+.td-cont-pregunta{padding:12px;background:#eff6ff;border:1px solid #1e6bd6;border-radius:10px;margin:12px 0;}
+.td-cont-title{font-weight:800;color:#1e3a8a;font-size:16px;margin-bottom:4px;}
+.td-cont-mat{font-size:14px;color:#1e3a8a;margin-bottom:10px;}
+.td-cont-btns{display:flex;gap:10px;}
+.td-cont-btn-si,.td-cont-btn-no{flex:1;padding:12px;font-size:15px;font-weight:800;border-radius:8px;cursor:pointer;border:2px solid;}
+.td-cont-btn-si{background:#16a34a;color:#fff;border-color:#15803d;}
+.td-cont-btn-si:disabled{opacity:0.5;cursor:not-allowed;}
+.td-cont-btn-no{background:#fff;color:#b91c1c;border-color:#b91c1c;}
+.td-cont-btn-no:disabled{opacity:0.5;cursor:not-allowed;}
+.td-cont-feedback{margin-top:8px;font-size:13px;font-weight:600;}
+.td-cont-no-form{padding:10px;background:#fef3c7;border:1px solid #ca8a04;border-radius:10px;margin-top:10px;}
+.td-cont-no-form.hidden{display:none;}
+.td-cont-no-title{font-weight:700;color:#854d0e;margin-bottom:8px;}
+.td-cont-no-row{margin-bottom:8px;}
+.td-cont-no-row label{display:block;font-size:13px;color:#1f2937;margin-bottom:4px;}
+.td-cont-no-row input,.td-cont-no-row select{width:100%;padding:8px;font-size:14px;border:1px solid #d1d5db;border-radius:6px;box-sizing:border-box;}
+.td-cont-no-cargar{width:100%;padding:10px;font-size:14px;font-weight:700;background:#1e6bd6;color:#fff;border:none;border-radius:6px;cursor:pointer;margin-top:4px;}
+.td-cont-no-cargar:disabled{opacity:0.5;cursor:not-allowed;background:#94a3b8;}
+.td-cont-no-feedback{margin-top:6px;font-size:13px;font-weight:600;}
+
+/* (eliminado v1.8.25) td-info-matriz-pendiente reemplazado por td-cont-pregunta arriba */
+
+/* (v1.8.31) Modal advertencia: ignorar boton Continuar Cajon */
+.adv-cont-modal{position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;}
+.adv-cont-modal.hidden{display:none;}
+.adv-cont-card{background:#fff;border-radius:14px;width:100%;max-width:480px;box-shadow:0 12px 40px rgba(0,0,0,0.35);overflow:hidden;}
+.adv-cont-header{padding:16px 20px;background:#dc2626;color:#fff;font-size:18px;font-weight:800;text-align:center;}
+.adv-cont-body{padding:18px 20px;font-size:15px;color:#1f2937;}
+.adv-cont-body p{margin:0 0 10px 0;}
+.adv-cont-body input{width:100%;padding:12px;font-size:18px;border:2px solid #d1d5db;border-radius:8px;text-align:center;letter-spacing:4px;box-sizing:border-box;}
+.adv-cont-body input:focus{outline:none;border-color:#1e6bd6;}
+.adv-cont-fb{margin-top:8px;font-size:14px;font-weight:600;min-height:18px;}
+.adv-cont-footer{padding:14px 16px;border-top:1px solid #e5e7eb;display:flex;gap:10px;}
+.adv-cont-cancel,.adv-cont-ok{flex:1;padding:14px;font-size:15px;font-weight:800;border-radius:8px;cursor:pointer;border:2px solid;}
+.adv-cont-cancel{background:#fff;color:#1e6bd6;border-color:#1e6bd6;}
+.adv-cont-cancel:hover{background:#eff6ff;}
+.adv-cont-ok{background:#dc2626;color:#fff;border-color:#991b1b;}
+.adv-cont-ok:hover{background:#b91c1c;}
+
+/* (v1.8.39) Estilos de botones de TEST eliminados. */

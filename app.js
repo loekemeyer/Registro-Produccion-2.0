@@ -6,7 +6,18 @@ document.addEventListener("DOMContentLoaded", () => {
   const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhyeGZjdHpuY2l4eHFtcGZoc2t2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MjQyNjEsImV4cCI6MjA4ODMwMDI2MX0.4L6wguch8UZGhC2VpzrWcCjJGUV-IkYsl9JoCWrOLUs";
   const TABLA_REGISTROS = "Registros Produccion Cervantes";
 
-  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  // (v1.8.43) Forzar SIEMPRE rol anon: la app no tiene login. Ignoramos cualquier
+  // sesion "authenticated" que pueda haber dejado otra app del mismo dominio
+  // (loekemeyer.github.io) bajo la storageKey compartida del proyecto Supabase.
+  // persistSession:false + storageKey propia => esta app nunca hereda esa sesion.
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+      storageKey: "prodcerv_anon_only"
+    }
+  });
 
   /* ================= WHATSAPP ALERTA ================= */
   const EDGE_FN_URL = SUPABASE_URL + "/functions/v1/send-whatsapp";
@@ -57,13 +68,16 @@ document.addEventListener("DOMContentLoaded", () => {
   /* ================= CACHE EMPLEADOS/MATRICES ================= */
   let empleadosMap = new Map();
   let matricesMap = new Map();
+  let stockMap = new Map();          // (v1.8.40) N_Matriz -> fila de UnixCajon_Stock (excluye 501 y tipo E)
   let _nombreMatrizOverride = null;
   let _varianteYaElegida = false;
+  let _lastPreviewMatriz = null;     // (v1.8.40) ultima matriz consultada en preview de E
 
   async function cargarCatalogos() {
-    const [empRes, matRes] = await Promise.all([
+    const [empRes, matRes, stockRes] = await Promise.all([
       sb.from("Empleados").select("*"),
-      sb.from("Matrices").select("*")
+      sb.from("Matrices").select("*"),
+      sb.from("UnixCajon_Stock_Registro_Prod_Cerv").select("*")
     ]);
     if (empRes.data) {
       empRes.data.forEach(e => {
@@ -77,6 +91,93 @@ document.addEventListener("DOMContentLoaded", () => {
         if (nm) matricesMap.set(nm, m);
       });
     }
+    if (stockRes.data) {
+      stockRes.data.forEach(r => {
+        const nm = String(r.N_Matriz || "").trim();
+        if (nm) stockMap.set(nm, r);
+      });
+    }
+  }
+
+  /* ================= STOCK DE CAJON (UnixCajon) — v1.8.40 ================= */
+  // El control de cajon (faltan X / uni_actual) esta activo solo si la matriz
+  // esta en el stock y tiene Uni_X_Cajon > 0. 501 y Tipo_Matriz=E NO estan en
+  // la tabla, por lo que stockActivo() devuelve false (se comportan como antes).
+  function stockRow(matriz) {
+    return stockMap.get(String(matriz || "").trim()) || null;
+  }
+  function stockActivo(matriz) {
+    const nm = String(matriz || "").trim();
+    if (!nm || nm === "501") return false;
+    const r = stockMap.get(nm);
+    return !!(r && Number(r.Uni_X_Cajon) > 0);
+  }
+  // Unidades que faltan para completar el cajon actual de esa matriz.
+  function faltanteCajon(matriz) {
+    const r = stockRow(matriz);
+    if (!r) return null;
+    const max = Number(r.Uni_X_Cajon) || 0;
+    if (max <= 0) return null;
+    const act = Number(r.Uni_Actual) || 0;
+    return Math.max(max - act, 0);
+  }
+  // Re-lee el stock de UNA matriz desde Supabase (es compartido, puede haber cambiado).
+  async function refreshStockMatriz(matriz) {
+    const nm = String(matriz || "").trim();
+    if (!nm) return null;
+    try {
+      const { data, error } = await sb
+        .from("UnixCajon_Stock_Registro_Prod_Cerv")
+        .select("*").eq("N_Matriz", nm).maybeSingle();
+      if (!error && data) stockMap.set(nm, data);
+      return data || null;
+    } catch { return null; }
+  }
+
+  /* ----- Cola de reintento para el RPC de stock (idempotente via p_evento_id) ----- */
+  function readStockQueue() {
+    try { return JSON.parse(localStorage.getItem(LS_STOCK_QUEUE) || "[]"); }
+    catch { return []; }
+  }
+  function writeStockQueue(arr) { localStorage.setItem(LS_STOCK_QUEUE, JSON.stringify(arr || [])); }
+
+  // Registra las unidades de un cajon en el stock compartido (RPC SECURITY DEFINER).
+  // Idempotente por p_evento_id (= id del cajon). Si falla (sin red), encola reintento.
+  async function registrarUnidadesStock(matriz, cantidad, completar, legajo, eventoId) {
+    const call = {
+      p_n_matriz: String(matriz || "").trim(),
+      p_cantidad: Number(cantidad) || 0,
+      p_completar: !!completar,
+      p_legajo: String(legajo || ""),
+      p_evento_id: eventoId
+    };
+    try {
+      const { data, error } = await sb.rpc("registrar_unidades", call);
+      if (error) throw error;
+      if (data && data[0]) {
+        const r = stockMap.get(call.p_n_matriz);
+        if (r) { r.Uni_Actual = data[0].uni_actual; stockMap.set(call.p_n_matriz, r); }
+      }
+      return true;
+    } catch (e) {
+      const q = readStockQueue();
+      if (!q.some(x => x.p_evento_id === eventoId)) { q.push(call); writeStockQueue(q); }
+      return false;
+    }
+  }
+
+  // Reintenta los RPC de stock pendientes. Seguro: el RPC es idempotente.
+  async function flushStockQueue() {
+    const q = readStockQueue();
+    if (!q.length) return;
+    const restantes = [];
+    for (const call of q) {
+      try {
+        const { error } = await sb.rpc("registrar_unidades", call);
+        if (error) throw error;
+      } catch { restantes.push(call); }
+    }
+    writeStockQueue(restantes);
   }
 
   /* ================= TIEMPO ================= */
@@ -88,8 +189,12 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function formatDateTimeAR(iso) {
-    try { return new Date(iso).toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" }); }
-    catch { return ""; }
+    try {
+      return new Date(iso).toLocaleString("es-AR", {
+        timeZone: "America/Argentina/Buenos_Aires",
+        hour12: false   // (v1.8.30) forzar 24h para evitar "04:18" ambiguo sin AM/PM
+      });
+    } catch { return ""; }
   }
 
   function dayKeyAR() {
@@ -126,12 +231,16 @@ document.addEventListener("DOMContentLoaded", () => {
     return parseInt(hex, 16) || null;
   }
 
+  /* ================= VERSION (unica fuente de verdad) ================= */
+  const LOCAL_VERSION = "v1.8.44";
+
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
   const VERSION = "_v2_supa";
   const MAX_DAY_HISTORY = 700;
   const LS_PREFIX = `prod_state${APP_TAG}${VERSION}`;
   const LS_QUEUE = `prod_queue${APP_TAG}${VERSION}`;
+  const LS_STOCK_QUEUE = `prod_stockq${APP_TAG}${VERSION}`;
   const DAY_GUARD_KEY = `prod_day_guard${APP_TAG}${VERSION}`;
 
   /* ================= UUID ================= */
@@ -154,7 +263,9 @@ document.addEventListener("DOMContentLoaded", () => {
     return {
       lastMatrix: null, lastCajon: null, lastDowntime: null,
       last2: [], lateArrivalSent: false, lateArrivalDiscarded: false,
-      matrixNeedsC: false, pcDone: false
+      matrixNeedsC: false, pcDone: false,
+      cajonContinuado: null,        // si el operario continuo cajon del dia anterior, info aca
+      continuacionConsultada: false  // flag para no preguntar 2 veces en el mismo dia
     };
   }
 
@@ -170,6 +281,10 @@ document.addEventListener("DOMContentLoaded", () => {
       s.lastDowntime = s.lastDowntime || null;
       s.matrixNeedsC = !!s.matrixNeedsC;
       s.tdCajonPending = s.tdCajonPending || null;
+      s.cajonContinuado = s.cajonContinuado || null;
+      s.continuacionConsultada = !!s.continuacionConsultada;
+      s.tdCargaPreviaListo = !!s.tdCargaPreviaListo;
+      s.tdCargaPreviaInfo = s.tdCargaPreviaInfo || null;
       return s;
     } catch { return freshState(); }
   }
@@ -186,20 +301,21 @@ document.addEventListener("DOMContentLoaded", () => {
     writeState(legajo, s);
   }
 
-  /* ================= RESET DIARIO (retiene 10 dias laborales) ================= */
+  /* ================= RESET DIARIO (retiene N dias calendario) ================= */
   const today = dayKeyAR();
 
-  function getLastNWorkdays(n) {
+  // (v1.8.34) Retener ULTIMOS N DIAS CALENDARIO (incluyendo sabados/domingos/feriados).
+  // Antes solo retenia laborables: si operario trabajaba sabado con matriz abierta,
+  // el lunes el cleanup borraba el state y se perdia la continuacion.
+  // 14 dias calendario = ~10 laborables + 4 fin de semana (cubre vacaciones cortas).
+  function getLastNDays(n) {
     const days = new Set();
     const d = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
-    while (days.size < n) {
-      const dow = d.getDay(); // 0=dom, 6=sab
-      if (dow !== 0 && dow !== 6) {
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, "0");
-        const dd = String(d.getDate()).padStart(2, "0");
-        days.add(`${y}-${m}-${dd}`);
-      }
+    for (let i = 0; i < n; i++) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      days.add(`${y}-${m}-${dd}`);
       d.setDate(d.getDate() - 1);
     }
     return days;
@@ -207,7 +323,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const lastDay = localStorage.getItem(DAY_GUARD_KEY);
   if (lastDay && lastDay !== today) {
-    const keepDays = getLastNWorkdays(10);
+    const keepDays = getLastNDays(14);
     for (let i = localStorage.length - 1; i >= 0; i--) {
       const k = localStorage.key(i);
       if (!k || !k.startsWith(LS_PREFIX + "::")) continue;
@@ -327,17 +443,17 @@ document.addEventListener("DOMContentLoaded", () => {
     const q = readQueue();
     const failed = q.filter(x => (x.__tries || 0) > 0).length;
     if (q.length === 0) {
-      badge.textContent = "v1.8.16 ✓";
+      badge.textContent = `${LOCAL_VERSION} ✓`;
       badge.style.background = "#f0fdf4";
       badge.style.color = "#166534";
       badge.style.borderColor = "#bbf7d0";
     } else if (failed > 0) {
-      badge.textContent = `v1.8.16 ⚠ ${q.length}`;
+      badge.textContent = `${LOCAL_VERSION} ⚠ ${q.length}`;
       badge.style.background = "#fef2f2";
       badge.style.color = "#991b1b";
       badge.style.borderColor = "#fecaca";
     } else {
-      badge.textContent = `v1.8.16 ⏳ ${q.length}`;
+      badge.textContent = `${LOCAL_VERSION} ⏳ ${q.length}`;
       badge.style.background = "#fffbeb";
       badge.style.color = "#92400e";
       badge.style.borderColor = "#fde68a";
@@ -611,10 +727,22 @@ document.addEventListener("DOMContentLoaded", () => {
         console.warn("DEBUG: hsInicio vacio para matriz", matNum, "usando tsEvent");
       }
 
-      let segTrabajados = diffSeconds(hsInicio, tsEvent);
-      if (segTrabajados <= 0) segTrabajados = 1;
+      // CONTINUACION CAJON CROSS-DIA: si viene cajon_continuado en payload, sumar seg de ayer
+      const cont = (esCajon && item.cajon_continuado) ? item.cajon_continuado : null;
+      let segTrabajados;
+      if (cont) {
+        // (tsActivacion -> tsEvent) hoy + segPostAyer ya calculado (tsInicioCajon -> hora_salida_ayer)
+        const segHoy = Math.max(1, diffSeconds(cont.tsActivacion || hsInicio, tsEvent));
+        segTrabajados = segHoy + Number(cont.segPostAyer || 0);
+      } else {
+        segTrabajados = diffSeconds(hsInicio, tsEvent);
+        if (segTrabajados <= 0) segTrabajados = 1;
+      }
       const dateInfo = dateFromISO(tsEvent);
-      const horaInicio = timeFromISO(hsInicio);
+      // Para continuacion: Hora_Inicio refleja el inicio real del caj (ts del lastMatrix/lastCajon de ayer)
+      const horaInicio = cont && cont.tsInicioCajon
+        ? timeFromISO(cont.tsInicioCajon)
+        : timeFromISO(hsInicio);
       const horaFin = timeFromISO(tsEvent);
 
       let segTiempoMuerto = 0;
@@ -624,7 +752,12 @@ document.addEventListener("DOMContentLoaded", () => {
       let anularTiempo = false;
 
       if (esCajon) {
-        segTiempoMuerto = await buscarTiemposMuertos(legajo, hsInicio, tsEvent, tsEvent);
+        if (cont) {
+          // TM solo del segmento de hoy (entre tsActivacion y tsEvent)
+          segTiempoMuerto = await buscarTiemposMuertos(legajo, cont.tsActivacion || hsInicio, tsEvent, tsEvent);
+        } else {
+          segTiempoMuerto = await buscarTiemposMuertos(legajo, hsInicio, tsEvent, tsEvent);
+        }
         segTrabajadosNeto = segTrabajados - segTiempoMuerto;
 
         if (uni > 0 && tiempoPromedio > 0) {
@@ -640,12 +773,14 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const destinoCM = op === "CM" ? String(item.texto || item.matriz || "").trim() : "";
+      const nombreBase = esCajon ? (item.nombreOverride || nombreMatriz) : "";
       const row = {
         Fecha: tsEvent,
         Legajo: legajo,
         // nombreOverride para variantes (ej: Mat 10 recta/curva)
+        // Si es continuacion cross-dia, prefijo [CONT] para auditar facil
         Nombre_Matriz: esCajon
-          ? (item.nombreOverride || nombreMatriz)
+          ? (cont ? `[CONT] ${nombreBase}`.trim() : nombreBase)
           : (op === "CM" && destinoCM
               ? `Cambiar Matriz a ${destinoCM}`
               : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion)),
@@ -657,6 +792,10 @@ document.addEventListener("DOMContentLoaded", () => {
         Nombre_Empleado: nombreEmpleado,
         Hora_Inicio: horaInicio,
         Hora_Fin: horaFin,
+        // (v1.8.35) Nuevas columnas timestamptz con DIA+hora. Mantienen Hora_Inicio/Hora_Fin
+        // para no romper modulos viejos. Cajon continuado: Fecha_Inicio es del dia anterior.
+        Fecha_Inicio: cont && cont.tsInicioCajon ? cont.tsInicioCajon : (hsInicio || tsEvent),
+        Fecha_Fin:    tsEvent,
         Anular_Tiempo: anularTiempo,
         Segundos_Historico: tiempoPromedio * uni,
         Segundos_Trabajados: esTM ? segTrabajados : segTrabajadosNeto,
@@ -1208,6 +1347,32 @@ document.addEventListener("DOMContentLoaded", () => {
     const varianteLabel = s.lastMatrix.nombreOverride ? `<br><small style="color:#1e6bd6;font-weight:700;">${s.lastMatrix.nombreOverride}</small>` : "";
     matrizInfo.innerHTML = `Matriz en uso: <span style="font-size:22px;">${s.lastMatrix.texto}</span>${varianteLabel}
       <small>Ultima matriz: ${s.lastMatrix.ts ? formatDateTimeAR(s.lastMatrix.ts) : ""}</small>`;
+    // (v1.8.40) Faltante para completar el cajon (stock compartido)
+    const mtx = s.lastMatrix.texto;
+    if (stockActivo(mtx)) {
+      const falta = faltanteCajon(mtx);
+      const act = Number(stockRow(mtx)?.Uni_Actual) || 0;
+      matrizInfo.innerHTML += `<div class="cajon-faltante" style="margin-top:8px;padding:8px;border-radius:8px;background:#eff6ff;color:#1e3a8a;font-weight:800;">Faltan ${falta} unidades para completar el cajón${act > 0 ? ` <small style="font-weight:500;">(ya hay ${act})</small>` : ""}</div>`;
+    }
+  }
+
+  // (v1.8.40) Muestra "faltan X" mientras el operario tipea el numero de matriz en E.
+  function previewFaltanteMatrizE() {
+    if (!selected || selected.code !== "E") return;
+    const nm = String(textInput.value || "").trim();
+    if (nm && stockActivo(nm)) {
+      const falta = faltanteCajon(nm);
+      const act = Number(stockRow(nm)?.Uni_Actual) || 0;
+      matrizInfo.classList.remove("hidden");
+      matrizInfo.innerHTML = `Matriz <b>${escapeHtml(nm)}</b>: faltan <b>${falta}</b> unidades para completar el cajón` +
+        (act > 0 ? ` <small>(ya hay ${act})</small>` : "");
+      if (_lastPreviewMatriz !== nm) {
+        _lastPreviewMatriz = nm;
+        refreshStockMatriz(nm).then(() => { if (selected && selected.code === "E") previewFaltanteMatrizE(); });
+      }
+    } else {
+      matrizInfo.classList.add("hidden");
+    }
   }
 
   /* ================= OPCIONES RENDER ================= */
@@ -1225,16 +1390,29 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const allowedPending = !pending || o.code === pending.opcion;
       const allowedMatrix = o.code !== "E" || !state?.matrixNeedsC;
+      // C deshabilitado si no hay matriz activa (sin sentido cerrar caj sin matriz abierta)
+      const allowedC = o.code !== "C" || !!state?.lastMatrix;
 
-      if (!allowedPending || !allowedMatrix) {
+      if (!allowedPending || !allowedMatrix || !allowedC) {
         d.style.opacity = "0.35"; d.style.pointerEvents = "none"; d.style.filter = "grayscale(100%)";
       } else {
-        d.addEventListener("click", () => selectOption(o, d));
+        // (v1.8.31) Si hay boton Continuar Cajon visible y el operario aprieta OTRA cosa,
+        // mostrar modal advertencia + pedir codigo logistica (151515) antes de proceder.
+        d.addEventListener("click", () => {
+          if (hayContinuarPendiente()) {
+            mostrarAdvertenciaIgnorarContinuar(() => selectOption(o, d));
+            return;
+          }
+          selectOption(o, d);
+        });
       }
 
       const target = o.row === 1 ? row1 : o.row === 2 ? row2 : o.row === 3 ? row3 : row4;
       target.appendChild(d);
     });
+
+    // (v1.8.26) Inyectar boton "Continuar Cajon" en row1 (a la derecha de C) si hay matriz pendiente de ayer
+    inyectarBotonContinuarEnRow1();
 
     if (!pending && state?.matrixNeedsC) {
       errorEl.style.color = "#b26a00";
@@ -1289,6 +1467,30 @@ document.addEventListener("DOMContentLoaded", () => {
       inputArea.classList.add("hidden");
       if (cmCerrando) textInput.value = stateSel.lastDowntime.texto || "";
     }
+
+    // (v1.8.40) Checkbox "cajon completo" + preview de faltante de cajon
+    const chkWrap = document.getElementById("cajonCompletoWrap");
+    const chk = document.getElementById("cajonCompletoChk");
+    if (chk) chk.checked = false;
+    if (chkWrap) chkWrap.classList.add("hidden");
+    textInput.oninput = null;
+    _lastPreviewMatriz = null;
+
+    if (opt.code === "E") {
+      // mostrar "faltan X" en vivo segun la matriz que va tipeando
+      textInput.oninput = previewFaltanteMatrizE;
+      previewFaltanteMatrizE();
+    } else if (opt.code === "C") {
+      const mtx = stateSel?.lastMatrix?.texto;
+      if (mtx && stockActivo(mtx)) {
+        if (chkWrap) chkWrap.classList.remove("hidden");
+        // refrescar el stock compartido y re-renderizar el faltante
+        refreshStockMatriz(mtx).then(() => {
+          if (selected && selected.code === "C") renderMatrizInfo();
+        });
+      }
+    }
+
     renderMatrizInfo();
   }
 
@@ -1300,6 +1502,287 @@ document.addEventListener("DOMContentLoaded", () => {
     errorEl.innerText = "";
     matrizInfo.classList.add("hidden");
     document.querySelectorAll(".box.selected").forEach(x => x.classList.remove("selected"));
+  }
+
+  /* ================= CONTINUACION DE CAJON CROSS-DIA ================= */
+  // Convierte time "HH:MM:SS" + fecha date a Date object (zona AR)
+  function timeStrToDate(timeStr, fechaDate) {
+    if (!timeStr || !fechaDate) return null;
+    const [h, m, s] = timeStr.split(":").map(Number);
+    const d = new Date(fechaDate);
+    d.setHours(h || 0, m || 0, s || 0, 0);
+    return d;
+  }
+
+  // Devuelve YYYY-MM-DD de ayer en zona AR
+  function dayKeyARYesterday() {
+    const now = new Date();
+    now.setDate(now.getDate() - 1);
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, "0");
+    const d = String(now.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  // Busca state guardado en localStorage de un dia anterior del mismo legajo
+  // que tenga una matriz abierta sin cerrar (E sin C posterior = matrixNeedsC=true).
+  // Retorna { dia, state } del dia mas reciente que cumpla, o null.
+  // NO consulta Supabase. Aprovecha que el cleanup retiene 10 dias laborables.
+  function getStateAnteriorConMatrizAbierta(legajo) {
+    const legStr = String(legajo).trim();
+    const todayStr = dayKeyAR();
+    let mejor = null;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(LS_PREFIX + "::")) continue;
+      const parts = k.split("::");
+      if (parts.length < 3) continue;
+      const dia = parts[1];
+      const leg = parts[2];
+      if (leg !== legStr || dia === todayStr) continue;
+      try {
+        const s = JSON.parse(localStorage.getItem(k));
+        if (!s || !s.lastMatrix?.texto || !s.matrixNeedsC) continue;
+        if (!mejor || dia > mejor.dia) mejor = { dia, state: s };
+      } catch { /* skip */ }
+    }
+    return mejor;
+  }
+
+  // Evalua si mostrar el banner "Continuar Cajon" para el legajo dado.
+  // Condiciones: state dia anterior tiene matriz abierta (matrixNeedsC=true) Y
+  // operario eligio "voy a seguir manana" en TD (terminoConContinuacion=true).
+  // Devuelve info para usar en el banner, o null.
+  function evaluarBannerContinuar(legajo) {
+    const state = readState(legajo);
+    // Si ya hay caj activo hoy o ya se descarto el banner -> no mostrar
+    if (state.lastMatrix || state.lastCajon) return null;
+    if (state.continuacionConsultada) return null;
+
+    const emp = empleadosMap.get(legajo);
+    if (!emp || !emp.hora_salida) return null;
+
+    const anterior = getStateAnteriorConMatrizAbierta(legajo);
+    if (!anterior) return null;
+    // Solo si ayer en TD eligio "voy a seguir manana"
+    if (!anterior.state.terminoConContinuacion) return null;
+
+    const lastMatrix = anterior.state.lastMatrix;
+    const lastCajon  = anterior.state.lastCajon;
+    const matriz = String(lastMatrix.texto || "").trim();
+    if (!matriz) return null;
+    const nombreMatriz = lastMatrix.nombreOverride ||
+      matricesMap.get(matriz)?.Matriz || "";
+
+    // tsInicioCajon = el ts MAS RECIENTE entre lastMatrix y lastCajon ayer.
+    // Si lastCajon es null, usar lastMatrix.ts.
+    const tsLM = lastMatrix.ts || "";
+    const tsLC = lastCajon?.ts || "";
+    let tsInicioCajon = tsLM;
+    if (tsLC && tsLC > tsLM) tsInicioCajon = tsLC;
+    if (!tsInicioCajon) return null;
+
+    // Calcular segPostAyer = hora_salida_ayer - tsInicioCajon
+    const fechaAyer = new Date(anterior.dia + "T00:00:00-03:00");
+    const dHorSal = timeStrToDate(emp.hora_salida, fechaAyer);
+    const dInicio = new Date(tsInicioCajon);
+    if (isNaN(dHorSal) || isNaN(dInicio)) return null;
+    const segPostAyer = Math.max(0, Math.floor((dHorSal - dInicio) / 1000));
+
+    return {
+      legajo,
+      matriz,
+      nombreMatriz,
+      fechaAyer: anterior.dia,
+      tsInicioCajon,
+      segPostAyer,
+      horaSalidaAyer: emp.hora_salida,
+      horaEntradaHoy: emp.hora_entrada || "08:30:00"
+    };
+  }
+
+  // (v1.8.33) Inyecta dinamicamente el boton "Continuar Matriz" ENTRE E y C.
+  // Llamada desde renderOptions() despues de pintar E/C.
+  function inyectarBotonContinuarEnRow1() {
+    const row1 = document.getElementById("row1");
+    if (!row1) return;
+    // Volver a row-2 por default
+    row1.classList.remove("row-3");
+    row1.classList.add("row-2");
+    const leg = legajoKey();
+    if (!leg) return;
+    const info = evaluarBannerContinuar(leg);
+    if (!info) return;
+    // Hay matriz pendiente: agregar boton ENTRE E y C
+    const d = document.createElement("div");
+    d.className = "box box-cont";
+    d.id = "btnContinuarCajonRow1";
+    const min = Math.round(info.segPostAyer / 60);
+    d.innerHTML =
+      `<div class="box-title">&#9889; Continuar Matriz</div>` +
+      `<div class="box-desc">Mat ${info.matriz} &mdash; ayer ${min} min</div>`;
+    d.dataset.legajo = info.legajo;
+    d.dataset.matriz = info.matriz;
+    d.dataset.nombreMatriz = info.nombreMatriz;
+    d.dataset.fechaAyer = info.fechaAyer;
+    d.dataset.tsInicioCajon = info.tsInicioCajon;
+    d.dataset.segPostAyer = String(info.segPostAyer);
+    d.dataset.horaSalidaAyer = info.horaSalidaAyer;
+    d.dataset.horaEntradaHoy = info.horaEntradaHoy;
+    d.addEventListener("click", handleClickBotonContinuar);
+    // Insertar antes del segundo hijo (C). Row1 actual: [E, C] -> queda [E, Cont, C]
+    const cBox = row1.querySelector('.box[data-code="C"]');
+    if (cBox) {
+      row1.insertBefore(d, cBox);
+    } else {
+      row1.appendChild(d);
+    }
+    // Cambiar grid a 3 cols
+    row1.classList.remove("row-2");
+    row1.classList.add("row-3");
+  }
+
+  // (v1.8.31) True si actualmente hay un boton "Continuar Cajon" pendiente en row1.
+  function hayContinuarPendiente() {
+    const leg = legajoKey();
+    if (!leg) return false;
+    return !!evaluarBannerContinuar(leg);
+  }
+
+  // (v1.8.31) Muestra modal de advertencia cuando el operario aprieta otra opcion
+  // teniendo el banner Continuar visible. Pide codigo de logistica (151515).
+  // Si el codigo es correcto -> ejecuta el callback (la opcion que apreto).
+  // Si cancela / codigo mal -> no hace nada.
+  const CODIGO_LOGISTICA_IGNORAR_CONT = "151515";
+  function mostrarAdvertenciaIgnorarContinuar(onConfirm) {
+    let modal = document.getElementById("advIgnorarContModal");
+    if (!modal) {
+      // Construir el modal si no existe
+      modal = document.createElement("div");
+      modal.id = "advIgnorarContModal";
+      modal.className = "adv-cont-modal hidden";
+      modal.innerHTML =
+        '<div class="adv-cont-card">' +
+        '  <div class="adv-cont-header">&#9888; Caj&oacute;n pendiente de continuar</div>' +
+        '  <div class="adv-cont-body">' +
+        '    <p>Ten&eacute;s un caj&oacute;n pendiente del d&iacute;a anterior.</p>' +
+        '    <p>Si segu&iacute;s con otra opci&oacute;n, <b>perd&eacute;s la posibilidad de continuar el caj&oacute;n</b> (no va a aparecer m&aacute;s el bot&oacute;n).</p>' +
+        '    <p><b>Avis&aacute; a Log&iacute;stica</b> antes de seguir. Te van a dar un c&oacute;digo:</p>' +
+        '    <input type="text" id="advIgnorarContCodigo" inputmode="numeric" placeholder="C&oacute;digo de Log&iacute;stica" autocomplete="off">' +
+        '    <div class="adv-cont-fb" id="advIgnorarContFb"></div>' +
+        '  </div>' +
+        '  <div class="adv-cont-footer">' +
+        '    <button type="button" class="adv-cont-cancel" id="advIgnorarContCancel">Cancelar</button>' +
+        '    <button type="button" class="adv-cont-ok" id="advIgnorarContOk">Continuar con otra opci&oacute;n</button>' +
+        '  </div>' +
+        '</div>';
+      document.body.appendChild(modal);
+    }
+    const input = modal.querySelector("#advIgnorarContCodigo");
+    const fb = modal.querySelector("#advIgnorarContFb");
+    const btnCancel = modal.querySelector("#advIgnorarContCancel");
+    const btnOk = modal.querySelector("#advIgnorarContOk");
+    if (input) input.value = "";
+    if (fb) fb.innerText = "";
+
+    function cerrar() { modal.classList.add("hidden"); }
+    function handleCancel() { cerrar(); cleanup(); }
+    function handleOk() {
+      const cod = (input?.value || "").trim();
+      if (cod !== CODIGO_LOGISTICA_IGNORAR_CONT) {
+        if (fb) { fb.style.color = "#b91c1c"; fb.innerText = "Código incorrecto. Pedile el código a Logística."; }
+        return;
+      }
+      // Codigo OK -> marcar continuacionConsultada=true para que el boton ya no aparezca
+      const leg = legajoKey();
+      if (leg) {
+        const s = readState(leg);
+        s.continuacionConsultada = true;
+        writeState(leg, s);
+      }
+      cerrar();
+      cleanup();
+      // Ejecutar la accion original (la opcion que apreto)
+      if (typeof onConfirm === "function") onConfirm();
+      // Re-renderizar para que desaparezca el boton Continuar
+      renderOptions();
+    }
+    function cleanup() {
+      btnCancel?.removeEventListener("click", handleCancel);
+      btnOk?.removeEventListener("click", handleOk);
+    }
+    btnCancel?.addEventListener("click", handleCancel);
+    btnOk?.addEventListener("click", handleOk);
+    modal.classList.remove("hidden");
+    setTimeout(() => input?.focus(), 50);
+  }
+
+  // Handler del click en el boton "Continuar Cajon".
+  // Setea state.cajonContinuado + lastMatrix/lastCajon como si fuera continuacion activa.
+  function handleClickBotonContinuar(e) {
+    const el = e?.currentTarget || document.getElementById("btnContinuarCajonRow1");
+    if (!el) return;
+    const leg = el.dataset.legajo;
+    const matriz = el.dataset.matriz;
+    const nombreMatriz = el.dataset.nombreMatriz || "";
+    const fechaAyer = el.dataset.fechaAyer;
+    const tsInicioCajon = el.dataset.tsInicioCajon;
+    const segPostAyer = Number(el.dataset.segPostAyer || 0);
+
+    const s = readState(leg);
+    const tsActivacion = isoNow();
+    s.lastMatrix = { opcion: "E", texto: matriz, ts: tsActivacion, nombreOverride: nombreMatriz || null };
+    s.lastCajon  = { opcion: "C", texto: matriz, ts: tsActivacion };
+    s.matrixNeedsC = true;
+    s.continuacionConsultada = true;
+    s.cajonContinuado = {
+      matriz,
+      nombreMatriz,
+      fechaAyer,
+      tsInicioCajon,
+      segPostAyer,
+      tsActivacion,
+      horaEntradaHoy: el.dataset.horaEntradaHoy || "08:30:00"
+    };
+    writeState(leg, s);
+
+    // (v1.8.36) Encolar Llegada Tarde si entra despues de hora_entrada.
+    // maybeSendLateArrival ya valida que sea primer evento del dia + hora > 08:30.
+    // Como ya seteamos lastMatrix/lastCajon antes, el "isFirst" check fallaria.
+    // Workaround: llamar antes de setear state? No, queremos que cuente como llegada tarde.
+    // Mejor: encolar el LT directamente aqui si corresponde.
+    try {
+      const day = dayKeyAR();
+      const horaEntrada = el.dataset.horaEntradaHoy || "08:30:00";
+      const horaEntradaIso = `${day}T${horaEntrada.length === 5 ? horaEntrada + ':00' : horaEntrada}-03:00`;
+      const ahora = new Date(tsActivacion);
+      const dEntrada = new Date(horaEntradaIso);
+      if (!isNaN(dEntrada) && ahora > dEntrada) {
+        const segTarde = Math.floor((ahora - dEntrada) / 1000);
+        if (segTarde >= 60) {
+          const ltPayload = {
+            id: uuidv4(), legajo: leg, opcion: "LT", descripcion: "Llegada Tarde",
+            texto: "", ts_event: tsActivacion, hs_inicio: horaEntradaIso, matriz: ""
+          };
+          // Marcar para que maybeSendLateArrival no lo duplique despues
+          const s2 = readState(leg);
+          s2.lateArrivalSent = true;
+          writeState(leg, s2);
+          updateStateAfterSend(leg, ltPayload);
+          enqueue(ltPayload);
+        }
+      }
+    } catch (e) { console.warn("LT continuar error:", e); }
+
+    renderOptions();      // re-render: el boton desaparecera (continuacionConsultada=true)
+    renderMatrizInfo();
+
+    const eEl = document.getElementById("error");
+    if (eEl) {
+      eEl.style.color = "#16a34a";
+      eEl.innerText = `Continuando Matriz ${matriz}. Apreta C cuando termines el cajon.`;
+      setTimeout(() => { if (eEl.innerText.startsWith("Continuando")) eEl.innerText = ""; }, 8000);
+    }
   }
 
   /* ================= LOGICA DE ESTADO ================= */
@@ -1324,9 +1807,11 @@ document.addEventListener("DOMContentLoaded", () => {
       s.lastCajon = { opcion: payload.opcion, texto: payload.texto || "", ts: payload.ts_event };
       s.lastDowntime = null;
       s.matrixNeedsC = false;
+      // Cerrar continuacion: ya se envio el C que completa el cajon de ayer
+      if (s.cajonContinuado) s.cajonContinuado = null;
       writeState(legajo, s); return;
     }
-    if (["RM", "PM", "RD", "LT"].includes(payload.opcion)) {
+    if (["RM", "PM", "RD"].includes(payload.opcion)) {
       s.lastDowntime = null;
       writeState(legajo, s); return;
     }
@@ -1400,13 +1885,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       // 8 matrices con variante
       const MATRICES_CON_VARIANTE = {
-        "3": {
-          pregunta: "Matriz 3 - Mango Pelador:",
-          opciones: [
-            { label: "Con Marca", matriz: "3", nombre: "Mango Pelador Con Marca" },
-            { label: "Sin Marca", matriz: "3B", nombre: "Mango Pelador Sin Marca" },
-          ],
-        },
         "12": {
           pregunta: "Doblado Mango Plano - Selecciona el tipo:",
           opciones: [
@@ -1533,6 +2011,17 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!payload.hs_inicio && stateBefore.last2.length > 0) {
         payload.hs_inicio = stateBefore.last2[0].ts || "";
       }
+      // CONTINUACION CROSS-DIA: si hay cajonContinuado activo, propagar al procesador
+      if (stateBefore.cajonContinuado) {
+        payload.cajon_continuado = {
+          matriz: stateBefore.cajonContinuado.matriz,
+          fechaAyer: stateBefore.cajonContinuado.fechaAyer,
+          // (v1.8.32) tsInicioCajon = ts del E (o lastCajon) de ayer = Hora_Inicio en BD
+          tsInicioCajon: stateBefore.cajonContinuado.tsInicioCajon,
+          segPostAyer: stateBefore.cajonContinuado.segPostAyer,
+          tsActivacion: stateBefore.cajonContinuado.tsActivacion
+        };
+      }
     }
     if (["RM", "PM", "RD"].includes(payload.opcion)) {
       payload.hs_inicio = tsEvent;
@@ -1564,6 +2053,15 @@ document.addEventListener("DOMContentLoaded", () => {
     enqueue(payload);
     renderSummary();
 
+    // (v1.8.40) Registrar las unidades del cajon en el stock compartido (si aplica).
+    // Idempotente por payload.id; si falla queda encolado para reintento.
+    if (payload.opcion === "C" && stockActivo(payload.matriz)) {
+      const completar = !!(document.getElementById("cajonCompletoChk")?.checked);
+      registrarUnidadesStock(payload.matriz, Number(texto), completar, legajo, payload.id);
+    }
+    const chkReset = document.getElementById("cajonCompletoChk");
+    if (chkReset) chkReset.checked = false;
+
     selected = null;
     selectedArea.classList.add("hidden");
     optionsScreen.classList.add("hidden");
@@ -1572,7 +2070,7 @@ document.addEventListener("DOMContentLoaded", () => {
     errorEl.innerText = "";
     document.querySelectorAll(".box.selected").forEach(x => x.classList.remove("selected"));
 
-    try { await flushQueue(); }
+    try { await flushQueue(); await flushStockQueue(); }
     finally { btnEnviar.disabled = false; btnEnviar.innerText = "Enviar"; }
   }
 
@@ -1771,24 +2269,332 @@ document.addEventListener("DOMContentLoaded", () => {
       html += '</div>';
     }
 
-    // Cajon extra: solo se ofrece si hay matriz en uso Y no se encolo uno
-    // en un intento previo de TD. En el reintento, el cajon ya esta en
-    // last2 y reflejado en el summary de arriba + va al bulk replay + al
-    // conteo del FJ, asi que mostrar la seccion otra vez es redundante y
-    // confuso (operario podria pensar que hace falta repetirlo).
-    if (lastMatrix && lastMatrix.texto && !state.tdCajonPending) {
+    // (eliminado v1.8.20) Cajon extra: se quito la pregunta "Hiciste otro cajon
+    // sin enviar?". Si el operario no apreto C antes de TD, ese cajon no se carga.
+    // Asumimos que el operario siempre cierra con C antes de terminar el dia.
+
+    // (v1.8.25) Si hay matriz abierta sin cerrar, preguntar "vas a seguir manana?"
+    // SI -> termina dia normal con flag terminoConContinuacion=true (banner aparece manana)
+    // NO -> form para completar (cantidad uni o TM) antes de terminar
+    // (v1.8.38) Si ya cargo previamente (apreto Cargar y cancelo TD), NO mostrar form
+    //          de nuevo (evitar duplicados). Mostrar mensaje "Ya cargaste X".
+    // (v1.8.40) Matrices CON control de cajon (stock): pregunta "¿hiciste un ultimo cajon?".
+    //   SI -> unidades (+ cajon completo) => se carga como C del dia y suma a uni_actual.
+    //   NO -> que estuvo haciendo => Tiempo Muerto con inicio = fin del ultimo cajon.
+    // Reemplaza, para esas matrices, al viejo "¿seguis manana?" + "Continuar Cajon".
+    // Las matrices SIN control (501, sin Uni_X_Cajon) mantienen el flujo viejo.
+    const matrizTD = lastMatrix?.texto || "";
+    const usarUltimoCajon = !!(matrizTD && stockActivo(matrizTD));
+    const yaCargoTD = !!(state.tdCargaPreviaListo && state.tdCargaPreviaInfo);
+
+    if (usarUltimoCajon) {
+      const matDesc = lastMatrix.nombreOverride || (matricesMap.get(matrizTD)?.Matriz || "");
+      if (yaCargoTD) {
+        html += '<div class="td-cont-pregunta">';
+        html += '<div class="td-cont-title">&#10003; Ya cargaste el cierre</div>';
+        html += `<div style="font-weight:700;color:#15803d;margin:8px 0;">${escapeHtml(state.tdCargaPreviaInfo.texto || '')}</div>`;
+        html += '<button type="button" id="btnUltFinalizar" class="td-confirm-btn" style="width:100%;margin-top:8px;">Finalizar d&iacute;a</button>';
+        html += '</div>';
+      } else {
+        const falta = faltanteCajon(matrizTD);
+        const act = Number(stockRow(matrizTD)?.Uni_Actual) || 0;
+        html += '<div class="td-cont-pregunta" id="tdUltBox">';
+        html += '<div class="td-cont-title">&iquest;Hiciste un &uacute;ltimo caj&oacute;n?</div>';
+        html += `<div class="td-cont-mat">Matriz <b>${escapeHtml(matrizTD)}</b>${matDesc ? " &mdash; " + escapeHtml(matDesc) : ""}<br><small>Faltan ${falta} para completar el caj&oacute;n${act > 0 ? ` (ya hay ${act})` : ""}</small></div>`;
+        html += '<div class="td-cont-btns">';
+        html += '<button type="button" id="btnUltSi" class="td-cont-btn-si">S&iacute;</button>';
+        html += '<button type="button" id="btnUltNo" class="td-cont-btn-no">No</button>';
+        html += '</div>';
+        html += '<div class="td-cont-feedback" id="tdUltFeedback"></div>';
+        // Form SI: unidades + cajon completo
+        html += '<div class="td-cont-no-form hidden" id="tdUltSiForm">';
+        html += `<div class="td-cont-no-row"><label>&iquest;Cu&aacute;ntas unidades hiciste en ese &uacute;ltimo caj&oacute;n? (Matriz ${escapeHtml(matrizTD)}):</label>`;
+        html += '<input type="text" id="tdUltUni" inputmode="numeric" placeholder="Cantidad de unidades"></div>';
+        html += '<div class="td-cont-no-row" style="margin-top:6px;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;color:#9a3412;"><input type="checkbox" id="tdUltCompleto" style="width:18px;height:18px;"> Caj&oacute;n completo (no hay m&aacute;s material &mdash; deja el stock en 0)</label></div>';
+        html += '<button type="button" id="btnUltSiCargar" class="td-cont-no-cargar">Cargar y finalizar d&iacute;a</button>';
+        html += '</div>';
+        // Form NO: que estuvo haciendo
+        html += '<div class="td-cont-no-form hidden" id="tdUltNoForm">';
+        html += '<div class="td-cont-no-title">&iquest;Qu&eacute; estuviste haciendo en ese tiempo?</div>';
+        html += '<div class="td-cont-no-row"><select id="tdUltNoTM"><option value="">-- eleg&iacute; --</option>';
+        OPTIONS.filter(o => isDowntime(o.code) && !["E","C","CM"].includes(o.code))
+          .forEach(o => { html += `<option value="${escapeHtml(o.code)}">${escapeHtml(o.code)} &mdash; ${escapeHtml(o.desc)}</option>`; });
+        html += '</select></div>';
+        html += '<button type="button" id="btnUltNoCargar" class="td-cont-no-cargar">Cargar y finalizar d&iacute;a</button>';
+        html += '</div>';
+        html += '<div class="td-cont-no-feedback" id="tdUltFb2"></div>';
+        html += '</div>';
+      }
+    } else if (lastMatrix && lastMatrix.texto && state.matrixNeedsC) {
       const matDesc = lastMatrix.nombreOverride || (matricesMap.get(lastMatrix.texto)?.Matriz || "");
-      const isPiedra = String(lastMatrix.texto).trim() === "501";
-      html += '<div class="td-cajon-extra">';
-      html += '<div class="td-cajon-extra-title">📦 ¿Hiciste otro cajón sin enviar?</div>';
-      html += `<div>Matriz en uso: <b>${escapeHtml(lastMatrix.texto)}</b>${matDesc ? " — " + escapeHtml(matDesc) : ""}</div>`;
-      html += '<div style="font-size:13px;color:#666;margin-top:4px;">Si hiciste otro cajón después del último envío, escribí la cantidad. Si no, dejalo vacío.</div>';
-      html += `<input type="text" id="td_cajon_extra" class="td-cajon-extra-input" inputmode="${isPiedra ? "decimal" : "numeric"}" placeholder="${isPiedra ? "Cantidad (ej: 12,5)" : "Cantidad"}">`;
-      html += '</div>';
+      if (state.tdCargaPreviaListo && state.tdCargaPreviaInfo) {
+        // Ya cargo antes y cancelo TD. Mostrar mensaje en lugar de form.
+        html += '<div class="td-cont-pregunta">';
+        html += '<div class="td-cont-title">&#10003; Ya cargaste lo que faltaba</div>';
+        html += `<div style="font-weight:700;color:#15803d;margin:8px 0;">${escapeHtml(state.tdCargaPreviaInfo.texto || '')}</div>`;
+        html += '<div style="font-size:13px;color:#1f2937;">Apret&aacute; <b>Terminar D&iacute;a</b> para finalizar.</div>';
+        html += '</div>';
+      } else {
+        html += '<div class="td-cont-pregunta" id="tdContPregunta">';
+        html += '<div class="td-cont-title">&iquest;Vas a seguir ma&ntilde;ana con esta matriz?</div>';
+        html += `<div class="td-cont-mat">Matriz <b>${escapeHtml(lastMatrix.texto)}</b>${matDesc ? " &mdash; " + escapeHtml(matDesc) : ""}</div>`;
+        html += '<div class="td-cont-btns">';
+        html += '<button type="button" id="btnContSi" class="td-cont-btn-si">S&iacute;, sigo ma&ntilde;ana</button>';
+        html += '<button type="button" id="btnContNo" class="td-cont-btn-no">No</button>';
+        html += '</div>';
+        html += '<div class="td-cont-feedback" id="tdContFeedback"></div>';
+        html += '</div>';
+
+        // Form caso NO (oculto inicialmente)
+        html += '<div class="td-cont-no-form hidden" id="tdContNoForm">';
+        html += '<div class="td-cont-no-title">Antes de terminar, complet&aacute; lo que falta:</div>';
+        html += `<div class="td-cont-no-row"><label>Cantidad de unidades del caj&oacute;n (Matriz ${escapeHtml(lastMatrix.texto)}):</label>`;
+        html += '<input type="text" id="tdContNoUni" inputmode="numeric" placeholder="Cantidad o vac&iacute;o si fue TM"></div>';
+        html += '<div class="td-cont-no-row"><label>O cargar Tiempo Muerto:</label>';
+        html += '<select id="tdContNoTM"><option value="">-- ninguno --</option>';
+        OPTIONS.filter(o => isDowntime(o.code) && !["E","C","CM"].includes(o.code))
+          .forEach(o => { html += `<option value="${escapeHtml(o.code)}">${escapeHtml(o.code)} &mdash; ${escapeHtml(o.desc)}</option>`; });
+        html += '</select></div>';
+        html += '<button type="button" id="btnContNoCargar" class="td-cont-no-cargar">Cargar y habilitar Terminar D&iacute;a</button>';
+        html += '<div class="td-cont-no-feedback" id="tdContNoFeedback"></div>';
+        html += '</div>';
+      }
     }
 
     terminarDiaContent.innerHTML = html;
     terminarDiaModal.classList.remove("hidden");
+    // Wireup handlers (los elementos recien se crearon en el DOM)
+    if (usarUltimoCajon) {
+      wireUpTDUltimoCajon(legajoStr);
+    } else if (lastMatrix && lastMatrix.texto && state.matrixNeedsC) {
+      wireUpTDContinuacion(legajoStr);
+    }
+    // (v1.8.44) El flujo de "ultimo cajon" usa su propio boton unico (cargar+finalizar),
+    // asi que ocultamos el boton de pie "Si, terminar dia" en ese caso.
+    if (btnConfirmTD) {
+      if (usarUltimoCajon) {
+        btnConfirmTD.style.display = "none";
+      } else {
+        btnConfirmTD.style.display = "";
+        const requiereEleccion = !!(lastMatrix && lastMatrix.texto && state.matrixNeedsC);
+        const yaEligio = !!state.terminoConContinuacion || !!state.tdCargaPreviaListo;
+        btnConfirmTD.disabled = requiereEleccion && !yaEligio;
+      }
+    }
+  }
+
+  // Cablea los handlers del form de continuacion dentro del modal TD.
+  function wireUpTDContinuacion(legajoStr) {
+    const btnSi = document.getElementById("btnContSi");
+    const btnNo = document.getElementById("btnContNo");
+    const formNo = document.getElementById("tdContNoForm");
+    const fb = document.getElementById("tdContFeedback");
+    if (btnSi) btnSi.addEventListener("click", () => {
+      const s = readState(legajoStr);
+      s.terminoConContinuacion = true;
+      writeState(legajoStr, s);
+      if (fb) {
+        fb.style.color = "#15803d";
+        fb.innerText = "OK. Mañana al entrar va a aparecer el botón 'Continuar Cajón'.";
+      }
+      if (btnSi) btnSi.disabled = true;
+      if (btnNo) btnNo.disabled = true;
+      if (formNo) formNo.classList.add("hidden");
+      if (btnConfirmTD) btnConfirmTD.disabled = false;
+    });
+    if (btnNo) btnNo.addEventListener("click", () => {
+      const s = readState(legajoStr);
+      s.terminoConContinuacion = false;
+      writeState(legajoStr, s);
+      if (fb) {
+        fb.style.color = "#b91c1c";
+        fb.innerText = "Cargá abajo lo que faltaba antes de terminar.";
+      }
+      if (btnSi) btnSi.disabled = true;
+      if (btnNo) btnNo.disabled = true;
+      if (formNo) formNo.classList.remove("hidden");
+      // TerminarDia queda deshabilitado hasta cargar uni o TM
+    });
+    const btnCargar = document.getElementById("btnContNoCargar");
+    if (btnCargar) btnCargar.addEventListener("click", async () => {
+      await handleTDContNoCargar(legajoStr);
+    });
+  }
+
+  // Encola un C con la cantidad ingresada o un TM con el codigo seleccionado.
+  // hs_inicio = max(lastCajon.ts, lastMatrix.ts).
+  async function handleTDContNoCargar(legajoStr) {
+    const inpUni = document.getElementById("tdContNoUni");
+    const selTM = document.getElementById("tdContNoTM");
+    const fbNo = document.getElementById("tdContNoFeedback");
+    const uniVal = (inpUni?.value || "").trim();
+    const tmVal  = (selTM?.value || "").trim();
+    // (v1.8.38) Anti-duplicado: si ya cargo previamente, no permitir cargar otra vez
+    const sPre = readState(legajoStr);
+    if (sPre.tdCargaPreviaListo) {
+      if (fbNo) { fbNo.style.color = "#b91c1c"; fbNo.innerText = "Ya cargaste un evento. Apretá Terminar Día o Cancelá."; }
+      return;
+    }
+    if (!uniVal && !tmVal) {
+      if (fbNo) { fbNo.style.color = "#b91c1c"; fbNo.innerText = "Cargá cantidad o seleccioná un TM (uno solo)."; }
+      return;
+    }
+    // (v1.8.37) Validacion: solo se permite UNO (no ambos)
+    if (uniVal && tmVal) {
+      if (fbNo) { fbNo.style.color = "#b91c1c"; fbNo.innerText = "Cargá UNA sola opción: cantidad O TM, no las dos."; }
+      return;
+    }
+    const s = readState(legajoStr);
+    const lm = s.lastMatrix;
+    if (!lm || !lm.texto) {
+      if (fbNo) { fbNo.style.color = "#b91c1c"; fbNo.innerText = "Estado inválido: no hay matriz."; }
+      return;
+    }
+    const tsLM = lm.ts || "";
+    const tsLC = s.lastCajon?.ts || "";
+    const hsInicio = (tsLC && tsLC > tsLM) ? tsLC : tsLM;
+    const ahora = isoNow();
+
+    if (uniVal) {
+      // Validar formato
+      const isPiedra = String(lm.texto).trim() === "501";
+      const re = isPiedra ? /^\d+(?:[.,]\d+)?$/ : /^[0-9]+$/;
+      if (!re.test(uniVal)) {
+        if (fbNo) { fbNo.style.color = "#b91c1c"; fbNo.innerText = isPiedra ? "Piedra (501): coma o punto" : "Solo enteros"; }
+        return;
+      }
+      const cantNorm = isPiedra ? uniVal.replace(/\./g, ",") : uniVal;
+      const cajPayload = {
+        id: uuidv4(),
+        legajo: legajoStr,
+        opcion: "C",
+        descripcion: "Cajon",
+        texto: cantNorm,
+        ts_event: ahora,
+        hs_inicio: hsInicio,
+        matriz: lm.texto
+      };
+      if (lm.nombreOverride) cajPayload.nombreOverride = lm.nombreOverride;
+      updateStateAfterSend(legajoStr, cajPayload);
+      enqueue(cajPayload);
+    }
+    if (tmVal) {
+      const optTM = OPTIONS.find(o => o.code === tmVal);
+      const tmPayload = {
+        id: uuidv4(),
+        legajo: legajoStr,
+        opcion: tmVal,
+        descripcion: optTM?.desc || tmVal,
+        texto: "",
+        ts_event: ahora,
+        hs_inicio: hsInicio,
+        matriz: lm.texto || ""
+      };
+      updateStateAfterSend(legajoStr, tmPayload);
+      enqueue(tmPayload);
+    }
+    // (v1.8.38) Marcar carga lista + guardar info para mostrar si reabre TD despues
+    const s2 = readState(legajoStr);
+    s2.tdCargaPreviaListo = true;
+    s2.tdCargaPreviaInfo = uniVal
+      ? { tipo: "C", texto: `Cajón cerrado con ${uniVal} unidades (Matriz ${s2.lastMatrix?.texto || ""})` }
+      : { tipo: tmVal, texto: `Tiempo Muerto: ${(OPTIONS.find(o => o.code === tmVal)?.desc) || tmVal}` };
+    writeState(legajoStr, s2);
+    if (fbNo) { fbNo.style.color = "#15803d"; fbNo.innerText = "OK. Ya podés apretar Terminar Día."; }
+    const btnCargar = document.getElementById("btnContNoCargar");
+    if (btnCargar) btnCargar.disabled = true;
+    if (btnConfirmTD) btnConfirmTD.disabled = false;
+  }
+
+  // (v1.8.40) Handlers de "¿hiciste un último cajón?" (matrices con control de stock).
+  function wireUpTDUltimoCajon(legajoStr) {
+    const btnSi = document.getElementById("btnUltSi");
+    const btnNo = document.getElementById("btnUltNo");
+    const siForm = document.getElementById("tdUltSiForm");
+    const noForm = document.getElementById("tdUltNoForm");
+    const fb = document.getElementById("tdUltFeedback");
+    if (btnSi) btnSi.addEventListener("click", () => {
+      if (siForm) siForm.classList.remove("hidden");
+      if (noForm) noForm.classList.add("hidden");
+      if (fb) fb.innerText = "";
+    });
+    if (btnNo) btnNo.addEventListener("click", () => {
+      if (noForm) noForm.classList.remove("hidden");
+      if (siForm) siForm.classList.add("hidden");
+      if (fb) fb.innerText = "";
+    });
+    const btnSiCargar = document.getElementById("btnUltSiCargar");
+    if (btnSiCargar) btnSiCargar.addEventListener("click", () => handleTDUltimoCajon(legajoStr, true));
+    const btnNoCargar = document.getElementById("btnUltNoCargar");
+    if (btnNoCargar) btnNoCargar.addEventListener("click", () => handleTDUltimoCajon(legajoStr, false));
+    // (v1.8.44) caso "ya cargado" (reabrio TD): boton unico para finalizar
+    const btnFin = document.getElementById("btnUltFinalizar");
+    if (btnFin) btnFin.addEventListener("click", () => confirmarTerminarDia());
+  }
+
+  // (v1.8.44) Carga el cierre del ultimo cajon (si todavia no se cargo) y finaliza
+  // el dia en UN solo paso (boton "Cargar y finalizar dia").
+  //   esSi=true  -> C con unidades (+ cajon completo) y suma al stock compartido.
+  //   esSi=false -> TM elegido, con inicio = fin del ultimo cajon (lastCajon.ts).
+  async function handleTDUltimoCajon(legajoStr, esSi) {
+    const fb = document.getElementById("tdUltFb2");
+    let s = readState(legajoStr);
+
+    if (!s.tdCargaPreviaListo) {
+      const lm = s.lastMatrix;
+      if (!lm || !lm.texto) {
+        if (fb) { fb.style.color = "#b91c1c"; fb.innerText = "Estado inválido: no hay matriz."; }
+        return;
+      }
+      const tsLM = lm.ts || "";
+      const tsLC = s.lastCajon?.ts || "";
+      const hsInicio = (tsLC && tsLC > tsLM) ? tsLC : tsLM;   // inicio = fin del ultimo cajon
+      const ahora = isoNow();
+
+      if (esSi) {
+        const uniVal = (document.getElementById("tdUltUni")?.value || "").trim();
+        const completo = !!document.getElementById("tdUltCompleto")?.checked;
+        if (!/^[0-9]+$/.test(uniVal)) {
+          if (fb) { fb.style.color = "#b91c1c"; fb.innerText = "Cargá la cantidad de unidades (solo enteros)."; }
+          return;
+        }
+        const cajPayload = {
+          id: uuidv4(), legajo: legajoStr, opcion: "C", descripcion: "Cajon",
+          texto: uniVal, ts_event: ahora, hs_inicio: hsInicio, matriz: lm.texto
+        };
+        if (lm.nombreOverride) cajPayload.nombreOverride = lm.nombreOverride;
+        updateStateAfterSend(legajoStr, cajPayload);
+        enqueue(cajPayload);
+        if (stockActivo(lm.texto)) {
+          registrarUnidadesStock(lm.texto, Number(uniVal), completo, legajoStr, cajPayload.id);
+        }
+        s = readState(legajoStr);
+        s.tdCargaPreviaListo = true;
+        s.tdCargaPreviaInfo = { tipo: "C", texto: `Último cajón: ${uniVal} unidades (Matriz ${lm.texto})${completo ? " — completo" : ""}` };
+        writeState(legajoStr, s);
+      } else {
+        const tmVal = (document.getElementById("tdUltNoTM")?.value || "").trim();
+        if (!tmVal) {
+          if (fb) { fb.style.color = "#b91c1c"; fb.innerText = "Elegí qué estuviste haciendo."; }
+          return;
+        }
+        const optTM = OPTIONS.find(o => o.code === tmVal);
+        const tmPayload = {
+          id: uuidv4(), legajo: legajoStr, opcion: tmVal, descripcion: optTM?.desc || tmVal,
+          texto: "", ts_event: ahora, hs_inicio: hsInicio, matriz: lm.texto || ""
+        };
+        updateStateAfterSend(legajoStr, tmPayload);
+        enqueue(tmPayload);
+        s = readState(legajoStr);
+        s.tdCargaPreviaListo = true;
+        s.tdCargaPreviaInfo = { tipo: tmVal, texto: `Tiempo Muerto: ${optTM?.desc || tmVal}` };
+        writeState(legajoStr, s);
+      }
+    }
+
+    // Cargado (ahora o antes) -> finalizar el dia directamente.
+    if (fb) { fb.style.color = "#15803d"; fb.innerText = "Finalizando día..."; }
+    await confirmarTerminarDia();
   }
 
   function closeTerminarDia() {
@@ -1804,21 +2610,8 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       const stateBefore = readState(legajoStr);
 
-      let cajonExtraValue = null;
-      const cajonExtraInput = document.getElementById("td_cajon_extra");
-      if (cajonExtraInput) {
-        const v = (cajonExtraInput.value || "").trim();
-        if (v) {
-          const isPiedra = String(stateBefore.lastMatrix?.texto || "").trim() === "501";
-          const re = isPiedra ? /^\d+(?:[.,]\d+)?$/ : /^[0-9]+$/;
-          if (!re.test(v)) {
-            alert(isPiedra ? "Para piedra (501): usar coma o punto (ej: 12,5)" : "Solo se permiten numeros enteros");
-            if (btnConfirmTD) { btnConfirmTD.disabled = false; btnConfirmTD.textContent = "Sí, terminar día"; }
-            return;
-          }
-          cajonExtraValue = isPiedra ? v.replace(/\./g, ",") : v;
-        }
-      }
+      // (eliminado v1.8.20) Validacion y procesamiento de "cajon extra".
+      // Si el operario no apreto C antes de TD, ese cajon NO se carga.
 
       // 1) Bulk replay snapshot del día (best-effort, idempotente)
       const replayRes = await bulkSendDayReplay(legajoStr, stateBefore.last2);
@@ -1840,37 +2633,31 @@ document.addEventListener("DOMContentLoaded", () => {
         enqueue(closePayload);
       }
 
-      // 3) Cajón extra opcional. Si tdCajonPending ya esta seteado, significa
-      //    que en un intento previo de TD se encolo el cajon pero el FJ fallo;
-      //    no re-encolar (evita duplicados en Supabase). El flag se limpia al
-      //    confirmar exitosamente (paso 6).
-      if (cajonExtraValue && !stateBefore.tdCajonPending) {
-        const stateNow = readState(legajoStr);
-        if (stateNow.lastMatrix?.texto) {
-          const cajonPayload = {
-            id: uuidv4(),
-            legajo: legajoStr,
-            opcion: "C",
-            descripcion: "Cajon",
-            texto: cajonExtraValue,
-            ts_event: isoNow(),
-            hs_inicio: computeHsInicio(stateNow),
-            matriz: stateNow.lastMatrix.texto
-          };
-          if (stateNow.lastMatrix.nombreOverride) {
-            cajonPayload.nombreOverride = stateNow.lastMatrix.nombreOverride;
-          }
-          updateStateAfterSend(legajoStr, cajonPayload);
-          enqueue(cajonPayload);
-          // Marcar como pendiente: si el FJ falla y reintenta, no encolamos otro
-          const sMark = readState(legajoStr);
-          sMark.tdCajonPending = cajonExtraValue;
-          writeState(legajoStr, sMark);
-        }
-      }
+      // 3) (eliminado v1.8.20) Cajon extra ya no se procesa.
 
       // 4) FJ con id deterministico (upsert merge para overwrite si ya existe)
+      //    texto del FJ = snapshot completo del dia para auditoria:
+      //    { counts: {opcion: n, ...}, events: [{id, opcion, texto, ts, ...}, ...] }
+      //    Permite detectar mensajes perdidos: si un evento esta en events[] pero
+      //    no aparece en la tabla de Registros / db_n8n_espejo => se perdio en el envio.
+      //    InformesVirgilio/calculo.js ya soporta este formato (lineas 271-281).
       const summaryFinal = getTodaySummaryForLegajo(legajoStr);
+      const stateForSnapshot = readState(legajoStr);
+      const eventsSnapshot = (stateForSnapshot.last2 || [])
+        .filter(it => it && it.opcion !== "FJ")
+        .map(it => ({
+          id: it.id,
+          opcion: it.opcion,
+          descripcion: it.descripcion || "",
+          texto: it.texto || "",
+          ts: it.ts,
+          hsInicio: it.hsInicio || "",
+          matriz: it.matriz || "",
+          nombreOverride: it.nombreOverride || null,
+          status: it.status || "",
+          sentAt: it.sentAt || "",
+          tries: it.tries || 0
+        }));
       const fjId = `fj_${legajoStr}_${dayKeyAR()}`;
       const fjTs = isoNow();
       const fjPayload = {
@@ -1878,7 +2665,10 @@ document.addEventListener("DOMContentLoaded", () => {
         legajo: legajoStr,
         opcion: "FJ",
         descripcion: "Fin de Jornada",
-        texto: JSON.stringify(summaryFinal.counts),
+        texto: JSON.stringify({
+          counts: summaryFinal.counts,
+          events: eventsSnapshot
+        }),
         ts_event: fjTs,
         hs_inicio: "",
         matriz: ""
@@ -1905,9 +2695,10 @@ document.addEventListener("DOMContentLoaded", () => {
         texto: fjPayload.texto, ts: fjTs, hsInicio: "", matriz: "",
         status: "sent", sentAt: fjTs
       });
-      // FJ OK: limpiar el flag de cajon pendiente. Proximo TD (si reabre el
-      // modal mas tarde el mismo dia) vuelve a mostrar el input fresco.
-      sFinal.tdCajonPending = null;
+      // (v1.8.20) tdCajonPending ya no se usa, se elimino la pregunta de cajon extra.
+      // (v1.8.38) Limpiar flags de carga previa al cerrar dia exitosamente.
+      sFinal.tdCargaPreviaListo = false;
+      sFinal.tdCargaPreviaInfo = null;
       writeState(legajoStr, sFinal);
 
       // 5) Forzar flush de la cola (TM cerrado / cajon extra) con deadline 10s.
@@ -1948,6 +2739,11 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.target === terminarDiaModal) closeTerminarDia();
   });
 
+  // (v1.8.26) Boton "Continuar Cajon" se inyecta dinamicamente en row1 desde renderOptions().
+  // El handler se cablea ahi mismo. No hay event listener global.
+
+  // (v1.8.39) Botones de TEST eliminados — solo necesarios en desarrollo inicial.
+
   const syncBadgeEl = document.getElementById("syncBadge");
   if (syncBadgeEl) {
     syncBadgeEl.addEventListener("click", async () => {
@@ -1977,14 +2773,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") flushQueue();
+    if (document.visibilityState === "visible") { flushQueue(); flushStockQueue(); }
   });
-  window.addEventListener("focus", () => flushQueue());
+  window.addEventListener("focus", () => { flushQueue(); flushStockQueue(); });
   window.addEventListener("online", async () => {
     const end = Date.now() + 3000;
     while (Date.now() < end && readQueue().length) await flushQueue();
+    flushStockQueue();
   });
-  setInterval(() => flushQueue(), 3000);
+  setInterval(() => { flushQueue(); flushStockQueue(); }, 3000);
 
   /* ================= LOG SW (debug visible en celu) ================= */
   const SW_LOG_KEY = "sw_log_v1";
@@ -2031,10 +2828,9 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch {}
   });
 
-  swLog(`Pagina cargada (v1.8.16)`);
+  swLog(`Pagina cargada (${LOCAL_VERSION})`);
 
   /* ================= SERVICE WORKER ================= */
-  const LOCAL_VERSION = "v1.8.16";
   let __swReloading = false;
 
   // Brave Android ignora updateViaCache:"none" y devuelve sw.js cacheado
@@ -2043,10 +2839,11 @@ document.addEventListener("DOMContentLoaded", () => {
   // El reload triggerea un registro fresh de SW que SI funciona.
   //
   // Anti-loop: el CDN puede tener sw.js nuevo pero app.js viejo cacheado.
-  // Si recargamos por update hace <60s y todavia vemos mismatch, NO recargar
-  // (significa que el deploy esta a mitad de propagar - esperar al proximo check).
+  // Si recargamos por update hace <COOLDOWN y todavia vemos mismatch, NO recargar.
+  // (v1.8.28) En TESTEO usamos 15s para iterar rapido. En PROD queda 60s.
   const UPDATE_RELOAD_KEY = "__lastUpdateReload";
-  const RELOAD_COOLDOWN_MS = 60000;
+  const IS_TESTEO = /TESTEO/i.test(window.location.href);
+  const RELOAD_COOLDOWN_MS = IS_TESTEO ? 15000 : 60000;
   async function checkForUpdateManual() {
     try {
       const res = await fetch(`sw.js?_t=${Date.now()}`, { cache: "no-store" });
@@ -2152,7 +2949,7 @@ document.addEventListener("DOMContentLoaded", () => {
     renderSummary();
     renderPending();
     updateSyncBadge();
-    console.log("app.js OK - v1.8.16");
+    console.log(`app.js OK - ${LOCAL_VERSION}`);
   }).catch(err => {
     console.error("Error cargando catalogos:", err);
     renderOptions();
