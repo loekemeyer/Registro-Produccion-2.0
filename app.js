@@ -2781,7 +2781,7 @@ document.addEventListener("DOMContentLoaded", () => {
     while (Date.now() < end && readQueue().length) await flushQueue();
     flushStockQueue();
   });
-  setInterval(() => { flushQueue(); flushStockQueue(); }, 3000);
+  setInterval(() => { flushQueue(); flushStockQueue(); }, 10000);
 
   /* ================= LOG SW (debug visible en celu) ================= */
   const SW_LOG_KEY = "sw_log_v1";
