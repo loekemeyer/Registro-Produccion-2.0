@@ -232,7 +232,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.44";
+  const LOCAL_VERSION = "v1.8.45";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -1883,7 +1883,7 @@ document.addEventListener("DOMContentLoaded", () => {
         alert(`La matriz ${texto} no existe. Verifica el numero.`);
         return;
       }
-      // 8 matrices con variante
+      // matrices con variante: al iniciar E se elige el tipo (cambia el codigo de matriz)
       const MATRICES_CON_VARIANTE = {
         "12": {
           pregunta: "Doblado Mango Plano - Selecciona el tipo:",
@@ -1898,6 +1898,15 @@ document.addEventListener("DOMContentLoaded", () => {
           opciones: [
             { label: "Varilla c/ Cuchilla Recta",  matriz: "10", nombre: "Varilla c/ Cuchilla Recta (HF11)" },
             { label: "Varilla c/ Cuchilla Curva",   matriz: "10B", nombre: "Varilla c/ Cuchilla Curva (HF15)" },
+          ],
+        },
+        // Matriz 28 (Corte Cuerpo Uña): el cuerpo va a Cromar (JF5) o a Pintar (JF2).
+        // El operario escribe 28 y elige; Cromar registra el codigo interno 28B.
+        "28": {
+          pregunta: "Corte Cuerpo Uña - ¿Para Cromar o Pintar?",
+          opciones: [
+            { label: "Pintar (JF2)", matriz: "28",  nombre: "Corte Cuerpo Uña p/Pintar (JF2)" },
+            { label: "Cromar (JF5)", matriz: "28B", nombre: "Corte Cuerpo Uña p/Cromar (JF5)" },
           ],
         },
         "39": {
