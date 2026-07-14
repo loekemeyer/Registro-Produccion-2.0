@@ -32,9 +32,18 @@ button{
 .row-4{grid-template-columns:repeat(4,1fr);}
 .row-5{grid-template-columns:repeat(5,1fr);}
 
-.box{box-sizing:border-box;border:2px solid #333;padding:12px 6px;text-align:center;cursor:pointer;}
-.box-title{font-size:20px;font-weight:bold;}
-.box-desc{font-size:11px;margin-top:4px;}
+.box{box-sizing:border-box;border:2px solid #333;padding:12px 6px;text-align:center;cursor:pointer;display:flex;flex-direction:column;justify-content:center;min-width:0;}
+.box-title{font-size:20px;font-weight:bold;line-height:1.1;overflow-wrap:anywhere;}
+.box-desc{font-size:11px;margin-top:4px;line-height:1.15;overflow-wrap:anywhere;}
+
+/* (v1.8.57) En celular los cuadros son angostos: achico tipografia y padding para
+   que textos largos (ej. "Movimiento Piedra", "Pare Consulta Matriz") no se salgan. */
+@media (max-width:480px){
+  .row{gap:6px;}
+  .box{padding:8px 3px;}
+  .box-title{font-size:15px;}
+  .box-desc{font-size:9.5px;margin-top:2px;}
+}
 
 .top-bar{display:flex;align-items:center;margin-bottom:6px;}
 .back-top{font-size:26px;cursor:pointer;}

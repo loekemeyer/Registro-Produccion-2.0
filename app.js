@@ -3,7 +3,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   /* ================= SUPABASE ================= */
   const SUPABASE_URL = "https://hrxfctzncixxqmpfhskv.supabase.co";
-  const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhyeGZjdHpuY2l4eHFtcGZoc2t2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MjQyNjEsImV4cCI6MjA4ODMwMDI2MX0.4L6wguch8UZGhC2VpzrWcCjJGUV-IkYsl9JoCWrOLUs";
+  const SUPABASE_KEY = "sb_publishable_BqpAgZH6ty-9wft10_YMhw_0rcIPuWT";
   const TABLA_REGISTROS = "Registros Produccion Cervantes";
 
   // (v1.8.43) Forzar SIEMPRE rol anon: la app no tiene login. Ignoramos cualquier
@@ -69,15 +69,17 @@ document.addEventListener("DOMContentLoaded", () => {
   let empleadosMap = new Map();
   let matricesMap = new Map();
   let stockMap = new Map();          // (v1.8.40) N_Matriz -> fila de UnixCajon_Stock (excluye 501 y tipo E)
+  let balancinesList = [];           // (v1.8.53) filas de Balancines (Num, Tipo, Activo, Matriz)
   let _nombreMatrizOverride = null;
   let _varianteYaElegida = false;
   let _lastPreviewMatriz = null;     // (v1.8.40) ultima matriz consultada en preview de E
 
   async function cargarCatalogos() {
-    const [empRes, matRes, stockRes] = await Promise.all([
+    const [empRes, matRes, stockRes, balRes] = await Promise.all([
       sb.from("Empleados").select("*"),
       sb.from("Matrices").select("*"),
-      sb.from("UnixCajon_Stock_Registro_Prod_Cerv").select("*")
+      sb.from("UnixCajon_Stock_Registro_Prod_Cerv").select("*"),
+      sb.from("Balancines").select("*")
     ]);
     if (empRes.data) {
       empRes.data.forEach(e => {
@@ -97,6 +99,55 @@ document.addEventListener("DOMContentLoaded", () => {
         if (nm) stockMap.set(nm, r);
       });
     }
+    if (balRes.data) {
+      // (v1.8.56) Num es alfanumerico (ej. 23A): orden natural (2 < 10 < 23A).
+      balancinesList = balRes.data.slice().sort((a, b) =>
+        String(a.Num).localeCompare(String(b.Num), "es", { numeric: true }));
+    }
+  }
+
+  // (v1.8.53) Balancines activos (para el selector de "Cambiar Matriz").
+  function balancinesActivos() {
+    return balancinesList.filter(b => b && b.Activo !== false);
+  }
+
+  /* ----- Asignar matriz a un balancin (RPC SECURITY DEFINER) + cola de reintento ----- */
+  function readBalancinQueue() {
+    try { return JSON.parse(localStorage.getItem(LS_BALANCIN_QUEUE) || "[]"); }
+    catch { return []; }
+  }
+  function writeBalancinQueue(arr) { localStorage.setItem(LS_BALANCIN_QUEUE, JSON.stringify(arr || [])); }
+
+  // Pone la matriz en el balancin destino y la libera de cualquier otro (una matriz =
+  // un balancin). Actualiza la copia local optimista; si el RPC falla, encola reintento.
+  async function asignarMatrizBalancin(balancin, matriz) {
+    const bal = String(balancin || "").trim();   // (v1.8.56) Num alfanumerico
+    const nm = String(matriz || "").trim();
+    // Update local optimista
+    balancinesList.forEach(b => { if (String(b.Matriz || "") === nm) b.Matriz = null; });
+    const target = balancinesList.find(b => String(b.Num) === bal);
+    if (target) target.Matriz = nm;
+    const call = { p_balancin: bal, p_matriz: nm };
+    try {
+      const { error } = await sb.rpc("asignar_matriz_balancin", call);
+      if (error) throw error;
+      return true;
+    } catch (e) {
+      const q = readBalancinQueue();
+      q.push(call); writeBalancinQueue(q);
+      return false;
+    }
+  }
+
+  async function flushBalancinQueue() {
+    const q = readBalancinQueue();
+    if (!q.length) return;
+    const restantes = [];
+    for (const call of q) {
+      try { const { error } = await sb.rpc("asignar_matriz_balancin", call); if (error) throw error; }
+      catch { restantes.push(call); }
+    }
+    writeBalancinQueue(restantes);
   }
 
   /* ================= STOCK DE CAJON (UnixCajon) — v1.8.40 ================= */
@@ -120,6 +171,11 @@ document.addEventListener("DOMContentLoaded", () => {
     if (max <= 0) return null;
     const act = Number(r.Uni_Actual) || 0;
     return Math.max(max - act, 0);
+  }
+  // (v1.8.49) Una matriz es "alimentador" si Tipo_Matriz = 'A' (columna de la tabla Matrices).
+  function esAlimentador(matriz) {
+    const m = matricesMap.get(String(matriz || "").trim());
+    return String(m?.Tipo_Matriz || "").trim().toUpperCase() === "A";
   }
   // Re-lee el stock de UNA matriz desde Supabase (es compartido, puede haber cambiado).
   async function refreshStockMatriz(matriz) {
@@ -232,7 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.45";
+  const LOCAL_VERSION = "v1.8.58";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -241,6 +297,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const LS_PREFIX = `prod_state${APP_TAG}${VERSION}`;
   const LS_QUEUE = `prod_queue${APP_TAG}${VERSION}`;
   const LS_STOCK_QUEUE = `prod_stockq${APP_TAG}${VERSION}`;
+  const LS_BALANCIN_QUEUE = `prod_balq${APP_TAG}${VERSION}`;   // (v1.8.53) reintento asignar matriz->balancin
   const DAY_GUARD_KEY = `prod_day_guard${APP_TAG}${VERSION}`;
 
   /* ================= UUID ================= */
@@ -265,7 +322,8 @@ document.addEventListener("DOMContentLoaded", () => {
       last2: [], lateArrivalSent: false, lateArrivalDiscarded: false,
       matrixNeedsC: false, pcDone: false,
       cajonContinuado: null,        // si el operario continuo cajon del dia anterior, info aca
-      continuacionConsultada: false  // flag para no preguntar 2 veces en el mismo dia
+      continuacionConsultada: false, // flag para no preguntar 2 veces en el mismo dia
+      pendingRM: null                // (v1.8.47) flujo Rotura Matriz a medias (persiste F5)
     };
   }
 
@@ -285,6 +343,7 @@ document.addEventListener("DOMContentLoaded", () => {
       s.continuacionConsultada = !!s.continuacionConsultada;
       s.tdCargaPreviaListo = !!s.tdCargaPreviaListo;
       s.tdCargaPreviaInfo = s.tdCargaPreviaInfo || null;
+      s.pendingRM = s.pendingRM || null;
       return s;
     } catch { return freshState(); }
   }
@@ -709,7 +768,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const esCajon = op === "C";
       const esTM = !esCajon && item.hs_inicio && isDowntime(op);
-      const esRM_PM_RD_LT = ["RM", "PM", "RD", "LT"].includes(op);
+      // (v1.8.47) RM vuelve como evento puntual (no es TM). PM sigue siendo TM (se espeja
+      // como tiempo muerto al cerrar). RM, RD y LT se espejan como evento puntual.
+      const esRM_PM_RD_LT = ["RM", "RD", "LT"].includes(op);
 
       if (!esCajon && !esTM && !esRM_PM_RD_LT) return;
 
@@ -890,33 +951,35 @@ document.addEventListener("DOMContentLoaded", () => {
   const pendingList = $("pendingList");
 
   /* ================= SELECTOR VARIANTE MATRIZ ================= */
-  function mostrarSelectorVariante(pregunta, opciones) {
+  function mostrarSelectorVariante(pregunta, opciones, ocultarCancelar) {
     return new Promise((resolve) => {
       const overlay = document.createElement("div");
       overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center";
 
       const modal = document.createElement("div");
-      modal.style.cssText = "background:#fff;border-radius:18px;padding:24px;max-width:340px;width:90%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)";
+      modal.style.cssText = "background:#fff;border-radius:20px;padding:32px 28px;max-width:480px;width:92%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)";
 
       const titulo = document.createElement("p");
-      titulo.style.cssText = "font-size:16px;font-weight:700;margin:0 0 16px";
+      titulo.style.cssText = "font-size:28px;font-weight:800;margin:0 0 24px;line-height:1.25";
       titulo.textContent = pregunta;
       modal.appendChild(titulo);
 
       opciones.forEach((op) => {
         const btn = document.createElement("button");
         btn.textContent = op.label;
-        btn.style.cssText = "display:block;width:100%;padding:14px;margin-bottom:10px;border:1px solid #c9d1d9;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;background:#f8f9fa";
+        btn.style.cssText = "display:block;width:100%;padding:24px;margin-bottom:14px;border:1px solid #c9d1d9;border-radius:14px;font-size:25px;font-weight:800;cursor:pointer;background:#f8f9fa";
         // FIX: resolve el objeto completo, no solo op.matriz
         btn.onclick = () => { overlay.remove(); resolve(op); };
         modal.appendChild(btn);
       });
 
-      const btnCancel = document.createElement("button");
-      btnCancel.textContent = "Cancelar";
-      btnCancel.style.cssText = "display:block;width:100%;padding:10px;border:none;background:transparent;color:#888;font-size:14px;cursor:pointer;margin-top:4px";
-      btnCancel.onclick = () => { overlay.remove(); resolve(null); };
-      modal.appendChild(btnCancel);
+      if (!ocultarCancelar) {
+        const btnCancel = document.createElement("button");
+        btnCancel.textContent = "Cancelar";
+        btnCancel.style.cssText = "display:block;width:100%;padding:14px;border:none;background:transparent;color:#888;font-size:16px;cursor:pointer;margin-top:6px";
+        btnCancel.onclick = () => { overlay.remove(); resolve(null); };
+        modal.appendChild(btnCancel);
+      }
 
       overlay.appendChild(modal);
       document.body.appendChild(overlay);
@@ -940,12 +1003,56 @@ document.addEventListener("DOMContentLoaded", () => {
     { code: "CM", desc: "Cambiar Matriz", row: 4, input: { show: true, label: "Numero matriz nueva", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
     { code: "PM", desc: "Pare Matriz", row: 4, input: { show: false } },
     { code: "RM", desc: "Rotura Matriz", row: 4, input: { show: false } },
-    { code: "REM", desc: "Reparando Matriz", row: 4, input: { show: false } }
+    { code: "REM", desc: "Reparando Matriz", row: 4, input: { show: false } },
+    { code: "PCM", desc: "Pare Consulta Matriz", row: 4, input: { show: false } },
+    // (v1.8.54) Botones de matriceria. TRM: 1er toque pide matriz, 2do cierra (tiempo
+    // muerto). TL: tiempo muerto simple. Ambos SIN alerta.
+    { code: "TRM", desc: "Trabajando en Matriz", row: 1, input: { show: true, label: "Numero matriz", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
+    { code: "TL", desc: "Taller", row: 1, input: { show: false } }
   ];
 
-  const NON_DOWNTIME = new Set(["E", "C", "RM", "PM", "RD", "LT"]);
+  // (v1.8.47) PM (Pare Matriz) es TIEMPO MUERTO (abre/cierra, mide duracion).
+  // RM (Rotura Matriz) NO es tiempo muerto: dispara el flujo cajon+CM (ver ejecutarFlujoRM);
+  // el tiempo de la rotura lo mide PCM (Pare Consulta Matriz), no RM.
+  const NON_DOWNTIME = new Set(["E", "C", "RM", "RD", "LT"]);
   const isDowntime = (op) => !NON_DOWNTIME.has(op);
   const sameDowntime = (a, b) => a && b && a.opcion === b.opcion && (a.texto || "") === (b.texto || "");
+
+  /* ================= CAPACIDADES POR OPERARIO (v1.8.54) ================= */
+  // Botones que ve un operario NORMAL (no matriceria). MOV/MOV P, CM, PR, RD se
+  // resuelven aparte segun capacidades. REM/TRM/TL son solo de matriceria.
+  const NORMAL_BASE = new Set(["E", "C", "PB", "BC", "LIMP", "Perm", "AL", "PC", "PM", "RM", "PCM"]);
+  function capsDe(legajo) {
+    const e = empleadosMap.get(String(legajo || "").trim()) || {};
+    const alimentador = e.es_alimentador === true;
+    return {
+      matriceria: e.es_matriceria === true,
+      piedra: e.es_piedra === true,
+      alimentador: alimentador,
+      cm: e.ve_cm === true || alimentador,   // alimentador implica CM
+      pr_rd: alimentador,                     // PR + RD = rol Alimentador
+      trm: e.ve_trm === true,
+      tl: e.ve_tl === true,
+      rem: e.ve_rem === true
+    };
+  }
+  function puedeCM(legajo) { return capsDe(legajo).cm; }
+  // ¿Se muestra este boton para estas capacidades?
+  function botonVisible(code, caps) {
+    if (caps.matriceria) {
+      if (code === "TRM") return caps.trm;
+      if (code === "TL") return caps.tl;
+      if (code === "CM") return caps.cm;
+      if (code === "REM") return caps.rem;
+      return false; // matriceria no ve los botones normales
+    }
+    if (code === "MOV") return !caps.piedra;
+    if (code === "MOV P") return caps.piedra;
+    if (code === "CM") return caps.cm;
+    if (code === "PR" || code === "RD") return caps.pr_rd;
+    if (code === "TRM" || code === "TL" || code === "REM") return false;
+    return NORMAL_BASE.has(code);
+  }
 
   let selected = null;
 
@@ -1381,8 +1488,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const leg = legajoKey();
     const state = leg ? readState(leg) : null;
     const pending = state?.lastDowntime || null;
+    const caps = capsDe(leg);   // (v1.8.54) capacidades del operario
 
     OPTIONS.forEach(o => {
+      // (v1.8.54) Mostrar solo los botones que el operario tiene permitidos (resto ocultos).
+      if (!botonVisible(o.code, caps)) return;
       const d = document.createElement("div");
       d.className = "box";
       d.dataset.code = o.code;
@@ -1399,20 +1509,43 @@ document.addEventListener("DOMContentLoaded", () => {
         // (v1.8.31) Si hay boton Continuar Cajon visible y el operario aprieta OTRA cosa,
         // mostrar modal advertencia + pedir codigo logistica (151515) antes de proceder.
         d.addEventListener("click", () => {
+          // (v1.8.53) Cambiar Matriz (apertura) -> modal matriz + balancin. El cierre de
+          // un tiempo muerto de CM sigue por el flujo normal (selectOption / cmCerrando).
+          const proceder = () => {
+            const st = readState(legajoKey());
+            if (o.code === "CM" && !(st && st.lastDowntime && st.lastDowntime.opcion === "CM")) {
+              abrirCambiarMatriz();
+            } else {
+              selectOption(o, d);
+            }
+          };
           if (hayContinuarPendiente()) {
-            mostrarAdvertenciaIgnorarContinuar(() => selectOption(o, d));
+            mostrarAdvertenciaIgnorarContinuar(proceder);
             return;
           }
-          selectOption(o, d);
+          proceder();
         });
       }
 
-      const target = o.row === 1 ? row1 : o.row === 2 ? row2 : o.row === 3 ? row3 : row4;
+      // (v1.8.55) E/C arriba (row1); el resto de los botones visibles van todos a row2,
+      // que se acomoda solo. Asi no quedan huecos al ocultar botones por capacidades.
+      const target = (o.code === "E" || o.code === "C") ? row1 : row2;
       target.appendChild(d);
     });
 
     // (v1.8.26) Inyectar boton "Continuar Cajon" en row1 (a la derecha de C) si hay matriz pendiente de ayer
     inyectarBotonContinuarEnRow1();
+
+    // (v1.8.55) Reflow: cada fila usada llena el ancho con su cantidad real de botones
+    // (hasta 5 columnas); las filas vacias se ocultan. Evita columnas/huecos vacios.
+    row3.style.display = "none";
+    row4.style.display = "none";
+    [row1, row2].forEach(r => {
+      const n = r.childElementCount;
+      if (n === 0) { r.style.display = "none"; return; }
+      r.style.display = "";
+      r.style.gridTemplateColumns = `repeat(${Math.min(n, 5)}, minmax(0, 1fr))`;
+    });
 
     if (!pending && state?.matrixNeedsC) {
       errorEl.style.color = "#b26a00";
@@ -1434,6 +1567,10 @@ document.addEventListener("DOMContentLoaded", () => {
     optionsScreen.classList.remove("hidden");
     renderOptions();
     renderMatrizInfo();
+
+    // (v1.8.47) Si quedo un flujo Rotura Matriz a medias (ej: se actualizo con F5),
+    // retomarlo: reexige la cantidad si no se cargo, o reabre Cambiar Matriz.
+    resumirFlujoRMSiHace(leg);
   }
 
   function backToLegajo() {
@@ -1455,9 +1592,9 @@ document.addEventListener("DOMContentLoaded", () => {
     errorEl.innerText = "";
     textInput.value = "";
 
-    // CM: 2da pulsacion cierra el TM, no pide input
+    // CM / TRM: 2da pulsacion cierra el TM, no pide input (v1.8.54: incluye TRM)
     const stateSel = readState(legajoKey());
-    const cmCerrando = opt.code === "CM" && stateSel?.lastDowntime?.opcion === "CM";
+    const cmCerrando = (opt.code === "CM" || opt.code === "TRM") && stateSel?.lastDowntime?.opcion === opt.code;
 
     if (opt.input.show && !cmCerrando) {
       inputArea.classList.remove("hidden");
@@ -1811,10 +1948,11 @@ document.addEventListener("DOMContentLoaded", () => {
       if (s.cajonContinuado) s.cajonContinuado = null;
       writeState(legajo, s); return;
     }
-    if (["RM", "PM", "RD"].includes(payload.opcion)) {
+    if (["RM", "RD"].includes(payload.opcion)) {
       s.lastDowntime = null;
       writeState(legajo, s); return;
     }
+    // (v1.8.47) PM cae aca (tiempo muerto): 1er envio abre, 2do cierra. RM salio arriba.
     if (isDowntime(payload.opcion)) {
       const item = { opcion: payload.opcion, texto: payload.texto || "", ts: payload.ts_event };
       if (!s.lastDowntime) s.lastDowntime = item;
@@ -1858,6 +1996,19 @@ document.addEventListener("DOMContentLoaded", () => {
 
     let texto = String(textInput.value || "").trim();
     const stateBefore = readState(legajo);
+
+    // (v1.8.47) RM (Rotura Matriz) NO es un envio normal ni un tiempo muerto: dispara
+    // el flujo cantidad -> cerrar cajon -> marcar rotura -> Cambiar Matriz.
+    if (selected.code === "RM") {
+      await ejecutarFlujoRM(legajo);
+      return;
+    }
+
+    // (v1.8.47) PCM: al CERRAR la consulta (2do toque) abre el popup Rota / no Rota.
+    if (selected.code === "PCM" && stateBefore.lastDowntime && stateBefore.lastDowntime.opcion === "PCM") {
+      await manejarCierrePCM(legajo);
+      return;
+    }
 
     if (selected.input.show) {
       let ok;
@@ -1975,13 +2126,13 @@ document.addEventListener("DOMContentLoaded", () => {
         });
       }
     }
-    if (selected.code === "CM") {
+    if (selected.code === "CM" || selected.code === "TRM") {
       if (!matricesMap.has(texto)) {
         alert(`La matriz ${texto} no existe. Verifica el numero.`);
         return;
       }
     }
-    if (["C", "RM", "PM", "RD"].includes(selected.code)) {
+    if (["C", "RM", "PM", "RD", "PCM"].includes(selected.code)) {
       if (!stateBefore.lastMatrix?.texto) {
         alert('Primero envia "E (Empece Matriz)" para registrar una matriz.');
         return;
@@ -2032,20 +2183,25 @@ document.addEventListener("DOMContentLoaded", () => {
         };
       }
     }
-    if (["RM", "PM", "RD"].includes(payload.opcion)) {
+    if (payload.opcion === "RD") {
       payload.hs_inicio = tsEvent;
     }
+    // TM (incluye ahora RM/PM): al CERRAR, hs_inicio = ts de apertura -> se mide la duracion.
     if (stateBefore.lastDowntime && sameDowntime(stateBefore.lastDowntime, payload)) {
       payload.hs_inicio = stateBefore.lastDowntime.ts || "";
     }
 
-    if (payload.opcion === "RM" || payload.opcion === "PM") {
+    // (v1.8.47) PM es tiempo muerto: la alerta "Paro Matriz" se manda solo al ABRIR.
+    // (RM ya no llega aca: se intercepta arriba y dispara ejecutarFlujoRM con su alerta.)
+    const abriendoPM = payload.opcion === "PM" &&
+      !(stateBefore.lastDowntime && sameDowntime(stateBefore.lastDowntime, payload));
+    if (abriendoPM) {
       const emp = empleadosMap.get(String(legajo).trim());
       const nombre = emp?.Empleado || "Legajo " + legajo;
       const matNum = payload.matriz || "?";
       const matInfo = matricesMap.get(matNum);
       const matNombre = matInfo?.Matriz || "";
-      const tipo = payload.opcion === "RM" ? "Rompio Matriz" : "Paro Matriz";
+      const tipo = "Paro Matriz";
       enviarAlertaWA({
         problema: tipo,
         matriz: matNum,
@@ -2060,6 +2216,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
     updateStateAfterSend(legajo, payload);
     enqueue(payload);
+    // (v1.8.47) Fin del flujo Rotura Matriz: al enviar el Cambiar Matriz, limpiar pendingRM.
+    if (payload.opcion === "CM") {
+      const sPend = readState(legajo);
+      if (sPend.pendingRM) { sPend.pendingRM = null; writeState(legajo, sPend); }
+    }
     renderSummary();
 
     // (v1.8.40) Registrar las unidades del cajon en el stock compartido (si aplica).
@@ -2071,6 +2232,20 @@ document.addEventListener("DOMContentLoaded", () => {
     const chkReset = document.getElementById("cajonCompletoChk");
     if (chkReset) chkReset.checked = false;
 
+    // (v1.8.49) Matriz alimentador (Tipo_Matriz='A'): al cerrar un cajon, en vez de
+    // volver directo, preguntar "Continuar Produciendo / Cambiar Matriz".
+    if (payload.opcion === "C" && esAlimentador(payload.matriz) && puedeCM(legajo)) {
+      selected = null;
+      selectedArea.classList.add("hidden");
+      matrizInfo.classList.add("hidden");
+      errorEl.innerText = "";
+      document.querySelectorAll(".box.selected").forEach(x => x.classList.remove("selected"));
+      btnEnviar.disabled = false; btnEnviar.innerText = "Enviar";
+      try { await flushQueue(); await flushStockQueue(); } catch (_e) {}
+      await popupAlimentadorCajon(legajo, { desdeRotura: false });
+      return;
+    }
+
     selected = null;
     selectedArea.classList.add("hidden");
     optionsScreen.classList.add("hidden");
@@ -2079,8 +2254,315 @@ document.addEventListener("DOMContentLoaded", () => {
     errorEl.innerText = "";
     document.querySelectorAll(".box.selected").forEach(x => x.classList.remove("selected"));
 
-    try { await flushQueue(); await flushStockQueue(); }
+    try { await flushQueue(); await flushStockQueue(); await flushBalancinQueue(); }
     finally { btnEnviar.disabled = false; btnEnviar.innerText = "Enviar"; }
+  }
+
+  /* ================= PARE CONSULTA MATRIZ (PCM) / ROTURA (RM) ================= */
+  // (v1.8.47) Modal OBLIGATORIO (sin cancelar) para pedir las unidades con las que
+  // se cierra el cajon. Devuelve siempre el texto ingresado (string).
+  function pedirCantidadCajon(es501) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center";
+      const modal = document.createElement("div");
+      modal.style.cssText = "background:#fff;border-radius:20px;padding:32px 28px;max-width:480px;width:92%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)";
+      const titulo = document.createElement("p");
+      titulo.style.cssText = "font-size:28px;font-weight:800;margin:0 0 22px;line-height:1.25";
+      titulo.textContent = "Unidades hechas para cerrar el cajon";
+      modal.appendChild(titulo);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.inputMode = es501 ? "decimal" : "numeric";
+      input.placeholder = es501 ? "Ej: 12,5" : "Ej: 1500";
+      input.style.cssText = "width:100%;box-sizing:border-box;padding:18px;font-size:28px;text-align:center;border:2px solid #c9d1d9;border-radius:14px;margin-bottom:8px";
+      modal.appendChild(input);
+      const err = document.createElement("div");
+      err.style.cssText = "color:#dc2626;font-size:15px;min-height:18px;margin-bottom:14px";
+      modal.appendChild(err);
+      const re = es501 ? /^\d+(?:[.,]\d+)?$/ : /^\d+$/;
+      const confirmar = () => {
+        const v = String(input.value || "").trim();
+        if (!re.test(v)) { err.textContent = es501 ? "Numero valido (coma o punto)" : "Solo numeros enteros"; return; }
+        overlay.remove(); resolve(v);
+      };
+      const btnOk = document.createElement("button");
+      btnOk.textContent = "Confirmar y cerrar cajon";
+      btnOk.style.cssText = "display:block;width:100%;padding:24px;border:1px solid #1aa34a;border-radius:14px;font-size:25px;font-weight:800;cursor:pointer;background:#eafff1;color:#0b6b2c";
+      btnOk.onclick = confirmar;
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") confirmar(); });
+      modal.appendChild(btnOk);
+      // (v1.8.47) SIN boton Cancelar: la carga de unidades es obligatoria.
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      setTimeout(() => { try { input.focus(); } catch (_e) {} }, 50);
+    });
+  }
+
+  function volverAInicio() {
+    selected = null;
+    selectedArea.classList.add("hidden");
+    optionsScreen.classList.add("hidden");
+    legajoScreen.classList.remove("hidden");
+    matrizInfo.classList.add("hidden");
+    errorEl.innerText = "";
+    document.querySelectorAll(".box.selected").forEach(x => x.classList.remove("selected"));
+    renderSummary();
+  }
+
+  // (v1.8.53) Modal de Cambiar Matriz: pide el numero de la matriz nueva Y el balancin
+  // donde se coloca (lista de balancines activos). Valida ambos. Devuelve
+  // { matriz, balancin } o null si cancela.
+  function pedirMatrizYBalancinModal() {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center";
+      const modal = document.createElement("div");
+      modal.style.cssText = "background:#fff;border-radius:20px;padding:32px 28px;max-width:480px;width:92%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)";
+      const titulo = document.createElement("p");
+      titulo.style.cssText = "font-size:28px;font-weight:800;margin:0 0 22px;line-height:1.25";
+      titulo.textContent = "Cambiar Matriz";
+      modal.appendChild(titulo);
+
+      const lblM = document.createElement("div");
+      lblM.style.cssText = "font-size:18px;font-weight:700;color:#334155;text-align:left;margin-bottom:6px";
+      lblM.textContent = "Matriz nueva";
+      modal.appendChild(lblM);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.inputMode = "numeric";
+      input.placeholder = "Ej: 110";
+      input.style.cssText = "width:100%;box-sizing:border-box;padding:18px;font-size:28px;text-align:center;border:2px solid #c9d1d9;border-radius:14px;margin-bottom:14px";
+      modal.appendChild(input);
+
+      const lblB = document.createElement("div");
+      lblB.style.cssText = "font-size:18px;font-weight:700;color:#334155;text-align:left;margin-bottom:6px";
+      lblB.textContent = "En que balancin";
+      modal.appendChild(lblB);
+      const sel = document.createElement("select");
+      sel.style.cssText = "width:100%;box-sizing:border-box;padding:16px;font-size:22px;border:2px solid #c9d1d9;border-radius:14px;margin-bottom:8px;background:#fff";
+      const activos = balancinesActivos();
+      const ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = activos.length ? "Elegi un balancin…" : "(no hay balancines cargados)";
+      sel.appendChild(ph);
+      activos.forEach(b => {
+        const opt = document.createElement("option");
+        opt.value = String(b.Num);
+        opt.textContent = (b.Tipo || "Balancin") + " " + b.Num;
+        sel.appendChild(opt);
+      });
+      modal.appendChild(sel);
+
+      const err = document.createElement("div");
+      err.style.cssText = "color:#dc2626;font-size:16px;min-height:20px;margin-bottom:14px";
+      modal.appendChild(err);
+
+      const confirmar = () => {
+        const m = String(input.value || "").trim();
+        if (!/^[0-9]+$/.test(m)) { err.textContent = "Matriz: solo numeros enteros"; return; }
+        if (!matricesMap.has(m)) { err.textContent = "La matriz " + m + " no existe"; return; }
+        const b = String(sel.value || "").trim();
+        if (!b) { err.textContent = "Elegi el balancin"; return; }
+        overlay.remove(); resolve({ matriz: m, balancin: b });   // (v1.8.56) Num alfanumerico
+      };
+      const btnOk = document.createElement("button");
+      btnOk.textContent = "Enviar";
+      btnOk.style.cssText = "display:block;width:100%;padding:24px;margin-bottom:10px;border:1px solid #1d4ed8;border-radius:14px;font-size:25px;font-weight:800;cursor:pointer;background:#eff6ff;color:#1e3a8a";
+      btnOk.onclick = confirmar;
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") confirmar(); });
+      modal.appendChild(btnOk);
+      const btnCancel = document.createElement("button");
+      btnCancel.textContent = "Cancelar";
+      btnCancel.style.cssText = "display:block;width:100%;padding:14px;border:none;background:transparent;color:#888;font-size:16px;cursor:pointer";
+      btnCancel.onclick = () => { overlay.remove(); resolve(null); };
+      modal.appendChild(btnCancel);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      setTimeout(() => { try { input.focus(); } catch (_e) {} }, 50);
+    });
+  }
+
+  // (v1.8.53) "Cambiar Matriz" (boton CM y popups de terminar cajon / PCM-Rota): abre el
+  // modal matriz + balancin. Al confirmar: asigna la matriz al balancin (y la libera de
+  // otros) via RPC, y registra el evento CM reutilizando sendFast.
+  async function abrirCambiarMatriz() {
+    const legajo = legajoKey();
+    const res = await pedirMatrizYBalancinModal();
+    if (res === null) {
+      // Cancelo: no cambia matriz. Cierra el flujo Rotura si estaba pendiente.
+      const s = readState(legajo);
+      if (s.pendingRM) { s.pendingRM = null; writeState(legajo, s); }
+      volverAInicio();
+      return;
+    }
+    // Asignar matriz -> balancin (RPC + cola de reintento; update local optimista).
+    asignarMatrizBalancin(res.balancin, res.matriz);
+    // Registrar el evento Cambiar Matriz (valida, encola, limpia pendingRM, navega al inicio).
+    selected = OPTIONS.find(o => o.code === "CM");
+    textInput.value = res.matriz;
+    await sendFast();
+  }
+
+  // (v1.8.49) Popup post-cajon SOLO para matrices alimentador (Tipo_Matriz='A'):
+  // "Continuar Produciendo" (sigue en la misma matriz) o "Cambiar Matriz" (abre CM).
+  // Reemplaza el auto-seleccionar Cambiar Matriz del flujo Rotura para esas matrices.
+  async function popupAlimentadorCajon(legajo, opts) {
+    const desdeRotura = !!(opts && opts.desdeRotura);
+    const el = await mostrarSelectorVariante("Cajon cerrado. ¿Que queres hacer?", [
+      { label: "Continuar Produciendo", val: "SEGUIR" },
+      { label: "Cambiar Matriz", val: "CM" }
+    ], true);   // sin boton Cancelar: los dos caminos son no destructivos
+    if (el && el.val === "CM") {
+      await abrirCambiarMatriz();   // modal matriz nueva; si venia de Rotura, pendingRM se limpia al enviar el CM
+      return;
+    }
+    // Continuar Produciendo: seguir en la misma matriz.
+    if (desdeRotura) {
+      const s = readState(legajo);
+      if (s.pendingRM) { s.pendingRM = null; writeState(legajo, s); }
+    }
+    volverAInicio();
+  }
+
+  // Cierra el TM de la consulta PCM (carga en PCM todo el tiempo desde que se abrio).
+  function cerrarPCM(legajo) {
+    const s = readState(legajo);
+    const dt = s.lastDowntime;
+    const cierre = {
+      id: uuidv4(), legajo, opcion: "PCM", descripcion: "Pare Consulta Matriz",
+      texto: "", ts_event: isoNow(),
+      hs_inicio: (dt && dt.opcion === "PCM") ? (dt.ts || "") : "", matriz: ""
+    };
+    updateStateAfterSend(legajo, cierre);   // sameDowntime(PCM,PCM) => cierra lastDowntime
+    enqueue(cierre);
+    renderSummary();
+  }
+
+  // (v1.8.47) FLUJO ROTURA MATRIZ (RM): NO es tiempo muerto. Es lo mismo apretar el
+  // boton RM que elegir "Matriz Rota" en el popup de PCM. Persistente ante F5 via
+  // state.pendingRM. Pasos: pide unidades (obligatorio) -> cierra el cajon completo
+  // (suma stock) -> marca la rotura (evento + alerta WhatsApp) -> abre Cambiar Matriz.
+  async function ejecutarFlujoRM(legajo) {
+    const s0 = readState(legajo);
+    const matriz = s0.lastMatrix?.texto || "";
+    if (!matriz) {
+      alert('Primero envia "E (Empece Matriz)" para registrar una matriz.');
+      return;
+    }
+    const s = readState(legajo);
+    s.pendingRM = { matriz, cajonHecho: false };
+    writeState(legajo, s);
+    await pasoCantidadYCajonRM(legajo);
+  }
+
+  // Paso resumible: pide la cantidad y cierra el cajon + rotura; luego abre Cambiar Matriz.
+  async function pasoCantidadYCajonRM(legajo) {
+    const s = readState(legajo);
+    const matriz = s.lastMatrix?.texto || s.pendingRM?.matriz || "";
+    if (!matriz) { volverAInicio(); return; }
+    const es501 = isMatrix501(s) || matriz === "501";
+    const cant = await pedirCantidadCajon(es501);   // obligatorio (no cancela)
+
+    // 1) Cajon "completo" con esas unidades (suma al stock si aplica)
+    const textoC = es501 ? normalizeToComma(cant) : cant;
+    const cajon = {
+      id: uuidv4(), legajo, opcion: "C", descripcion: "Cajon",
+      texto: textoC, ts_event: isoNow(),
+      hs_inicio: computeHsInicio(s) || (s.last2[0]?.ts || ""),
+      matriz
+    };
+    if (s.lastMatrix?.nombreOverride) cajon.nombreOverride = s.lastMatrix.nombreOverride;
+    if (s.cajonContinuado) {
+      cajon.cajon_continuado = {
+        matriz: s.cajonContinuado.matriz,
+        fechaAyer: s.cajonContinuado.fechaAyer,
+        tsInicioCajon: s.cajonContinuado.tsInicioCajon,
+        segPostAyer: s.cajonContinuado.segPostAyer,
+        tsActivacion: s.cajonContinuado.tsActivacion
+      };
+    }
+    updateStateAfterSend(legajo, cajon);
+    enqueue(cajon);
+    if (stockActivo(matriz)) {
+      registrarUnidadesStock(matriz, Number(String(textoC).replace(",", ".")), true, legajo, cajon.id);
+    }
+
+    // 2) Marcar la rotura (evento puntual, NO tiempo muerto) + alerta WhatsApp
+    const rm = {
+      id: uuidv4(), legajo, opcion: "RM", descripcion: "Rotura Matriz",
+      texto: "", ts_event: isoNow(), hs_inicio: "", matriz
+    };
+    if (s.lastMatrix?.nombreOverride) rm.nombreOverride = s.lastMatrix.nombreOverride;
+    enqueue(rm);
+    const emp = empleadosMap.get(String(legajo).trim());
+    enviarAlertaWA({
+      problema: "Rompio Matriz",
+      matriz: matriz || "?",
+      descripcion: matricesMap.get(matriz)?.Matriz || "",
+      operario: emp?.Empleado || ("Legajo " + legajo),
+      horaEvento: new Date().toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" })
+    });
+
+    // 3) Persistir que el cajon ya se cargo (para F5 -> reabrir directo Cambiar Matriz)
+    const s2 = readState(legajo);
+    if (s2.pendingRM) { s2.pendingRM.cajonHecho = true; writeState(legajo, s2); }
+    renderSummary();
+
+    try { await flushQueue(); await flushStockQueue(); } catch (_e) {}
+
+    // 4) Alimentador (Tipo_Matriz='A'): preguntar Continuar Produciendo / Cambiar Matriz.
+    //    Resto: ejecutar Cambiar Matriz directo (el operario tipea la matriz nueva).
+    //    pendingRM se limpia al enviar el CM (ver sendFast) o al elegir "Continuar".
+    // (v1.8.54) Fin del flujo RM: Cambiar Matriz SOLO si el operario tiene esa capacidad.
+    // El operario normal no cambia matriz -> termina en la rotura.
+    await finalizarFlujoRM(legajo);
+  }
+
+  // (v1.8.54) Cierre del flujo Rotura: con CM abre Cambiar Matriz; sin CM termina.
+  async function finalizarFlujoRM(legajo) {
+    if (puedeCM(legajo)) {
+      await abrirCambiarMatriz();
+      return;
+    }
+    const s = readState(legajo);
+    if (s.pendingRM) { s.pendingRM = null; writeState(legajo, s); }
+    volverAInicio();
+    try { await flushQueue(); await flushStockQueue(); await flushBalancinQueue(); } catch (_e) {}
+  }
+
+  // Reanuda un flujo RM que quedo a medias (ej: el operario actualizo con F5).
+  async function resumirFlujoRMSiHace(legajo) {
+    const s = readState(legajo);
+    if (!s.pendingRM) return false;
+    if (!s.pendingRM.cajonHecho) { await pasoCantidadYCajonRM(legajo); }
+    else { await finalizarFlujoRM(legajo); }   // (v1.8.54) CM solo si tiene permiso
+    return true;
+  }
+
+  // (v1.8.47) Cierre de "Pare Consulta Matriz": popup Rota / no Rota. El PCM sigue
+  // ABIERTO durante el popup (si el operario actualiza con F5, PCM queda abierto y
+  // puede volver a decidir). Recien se cierra al elegir.
+  async function manejarCierrePCM(legajo) {
+    const eleccion = await mostrarSelectorVariante("¿La matriz se rompio?", [
+      { label: "Matriz Rota (RM)", val: "RM" },
+      { label: "Matriz no Rota (continua)", val: "NO" }
+    ]);
+
+    // Cancelar el popup: no decide nada, PCM queda abierto (se puede reintentar).
+    if (!eleccion) { return; }
+
+    if (eleccion.val !== "RM") {
+      // Matriz no Rota: cierra PCM (mide la consulta) y sigue como estaba.
+      cerrarPCM(legajo);
+      volverAInicio();
+      try { await flushQueue(); await flushStockQueue(); } catch (_e) {}
+      return;
+    }
+
+    // Matriz Rota: cierra PCM (todo el tiempo hasta aca se carga en PCM) y dispara RM.
+    cerrarPCM(legajo);
+    await ejecutarFlujoRM(legajo);
   }
 
   /* ================= HISTORIAL DIAS ANTERIORES ================= */
