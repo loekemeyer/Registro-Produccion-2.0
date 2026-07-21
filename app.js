@@ -1000,6 +1000,9 @@ document.addEventListener("DOMContentLoaded", () => {
     { code: "PC", desc: "Pare Comida", row: 3, input: { show: false } },
     { code: "RD", desc: "Rollo Fleje Doblado", row: 3, input: { show: false } },
     { code: "MOV P", desc: "Movimiento Piedra", row: 3, input: { show: false } },
+    // (v1.8.59) Movimiento Matriceria: para operarios de piedra que tambien hacen
+    // tareas de matriceria (ej. David Ayala). Se muestra si ve_mm === true.
+    { code: "MM", desc: "Movimiento Matriceria", row: 3, input: { show: false } },
     { code: "CM", desc: "Cambiar Matriz", row: 4, input: { show: true, label: "Numero matriz nueva", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
     { code: "PM", desc: "Pare Matriz", row: 4, input: { show: false } },
     { code: "RM", desc: "Rotura Matriz", row: 4, input: { show: false } },
@@ -1033,7 +1036,8 @@ document.addEventListener("DOMContentLoaded", () => {
       pr_rd: alimentador,                     // PR + RD = rol Alimentador
       trm: e.ve_trm === true,
       tl: e.ve_tl === true,
-      rem: e.ve_rem === true
+      rem: e.ve_rem === true,
+      mm: e.ve_mm === true       // (v1.8.59) Movimiento Matriceria (piedra + matriceria)
     };
   }
   function puedeCM(legajo) { return capsDe(legajo).cm; }
@@ -1048,6 +1052,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (code === "MOV") return !caps.piedra;
     if (code === "MOV P") return caps.piedra;
+    if (code === "MM") return caps.mm;   // (v1.8.59) piedra que tambien hace matriceria
     if (code === "CM") return caps.cm;
     if (code === "PR" || code === "RD") return caps.pr_rd;
     if (code === "TRM" || code === "TL" || code === "REM") return false;
