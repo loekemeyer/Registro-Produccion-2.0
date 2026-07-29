@@ -288,7 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.60";
+  const LOCAL_VERSION = "v1.8.63";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -2398,7 +2398,10 @@ document.addEventListener("DOMContentLoaded", () => {
       activos.forEach(b => {
         const opt = document.createElement("option");
         opt.value = String(b.Num);
-        opt.textContent = (b.Tipo || "Balancin") + " " + b.Num;
+        // (v1.8.62) Si Tipo == Num (ej. lugar "Alimentador"), mostrarlo una sola vez.
+        opt.textContent = (String(b.Tipo || "") === String(b.Num))
+          ? String(b.Num)
+          : ((b.Tipo || "Balancin") + " " + b.Num);
         sel.appendChild(opt);
       });
       modal.appendChild(sel);
@@ -2458,8 +2461,15 @@ document.addEventListener("DOMContentLoaded", () => {
   // Reemplaza el auto-seleccionar Cambiar Matriz del flujo Rotura para esas matrices.
   async function popupAlimentadorCajon(legajo, opts) {
     const desdeRotura = !!(opts && opts.desdeRotura);
-    const el = await mostrarSelectorVariante("Cajon cerrado. ¿Que queres hacer?", [
-      { label: "Continuar Produciendo", val: "SEGUIR" },
+    // (v1.8.63) En el flujo de rotura el operario no "sigue produciendo" (la matriz
+    // esta rota): al elegir "No cambiar matriz" vuelve al menu y hace lo que necesite
+    // -un MOV, ordenar cajones, o ir a un balancin (que es un NUEVO E / empezar matriz,
+    // no un MOV)- mientras matriceria saca, repara y recoloca la matriz. Por eso la
+    // etiqueta queda neutra y NO menciona movimientos.
+    const titulo = desdeRotura ? "Rotura registrada. ¿Que queres hacer?" : "Cajon cerrado. ¿Que queres hacer?";
+    const labelSeguir = desdeRotura ? "No cambiar matriz" : "Continuar Produciendo";
+    const el = await mostrarSelectorVariante(titulo, [
+      { label: labelSeguir, val: "SEGUIR" },
       { label: "Cambiar Matriz", val: "CM" }
     ], true);   // sin boton Cancelar: los dos caminos son no destructivos
     if (el && el.val === "CM") {
@@ -2571,6 +2581,18 @@ document.addEventListener("DOMContentLoaded", () => {
   // (v1.8.54) Cierre del flujo Rotura: con CM abre Cambiar Matriz; sin CM termina.
   async function finalizarFlujoRM(legajo) {
     if (puedeCM(legajo)) {
+      // (v1.8.61) Matriz alimentador (Tipo_Matriz='A'): igual que el cierre normal de
+      // cajon, preguntar "Continuar Produciendo / Cambiar Matriz" en vez de forzar el
+      // Cambiar Matriz. Los datos de produccion muestran que tras la rotura el operario
+      // sigue en la MISMA matriz (ej: Eduardo/leg 19 hizo 3 roturas seguidas en la 71
+      // -Tipo A- sin ningun CM). Reutiliza popupAlimentadorCajon (que ya existia justo
+      // para esto pero nunca se habia conectado a este flujo).
+      const s0 = readState(legajo);
+      const matrizRota = s0.pendingRM?.matriz || s0.lastMatrix?.texto || "";
+      if (esAlimentador(matrizRota)) {
+        await popupAlimentadorCajon(legajo, { desdeRotura: true });
+        return;
+      }
       await abrirCambiarMatriz();
       return;
     }
