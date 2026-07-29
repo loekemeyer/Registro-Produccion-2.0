@@ -288,7 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.60";
+  const LOCAL_VERSION = "v1.8.61";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -2571,6 +2571,18 @@ document.addEventListener("DOMContentLoaded", () => {
   // (v1.8.54) Cierre del flujo Rotura: con CM abre Cambiar Matriz; sin CM termina.
   async function finalizarFlujoRM(legajo) {
     if (puedeCM(legajo)) {
+      // (v1.8.61) Matriz alimentador (Tipo_Matriz='A'): igual que el cierre normal de
+      // cajon, preguntar "Continuar Produciendo / Cambiar Matriz" en vez de forzar el
+      // Cambiar Matriz. Los datos de produccion muestran que tras la rotura el operario
+      // sigue en la MISMA matriz (ej: Eduardo/leg 19 hizo 3 roturas seguidas en la 71
+      // -Tipo A- sin ningun CM). Reutiliza popupAlimentadorCajon (que ya existia justo
+      // para esto pero nunca se habia conectado a este flujo).
+      const s0 = readState(legajo);
+      const matrizRota = s0.pendingRM?.matriz || s0.lastMatrix?.texto || "";
+      if (esAlimentador(matrizRota)) {
+        await popupAlimentadorCajon(legajo, { desdeRotura: true });
+        return;
+      }
       await abrirCambiarMatriz();
       return;
     }
