@@ -288,7 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.58";
+  const LOCAL_VERSION = "v1.8.60";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -984,6 +984,39 @@ document.addEventListener("DOMContentLoaded", () => {
       overlay.appendChild(modal);
       document.body.appendChild(overlay);
     });
+  }
+
+  // (v1.8.60) Deteccion dinamica de variantes de matriz desde la BD.
+  // El input de "Empece Matriz" solo acepta digitos, asi que las matrices con
+  // sufijo de letra (ej: 101 -> 101/101B/101C/101D/101E, 505 -> 505/505B..505F)
+  // son inalcanzables sin un popup. Dado un numero base, junta el codigo base (si
+  // existe como matriz) y todas las N_Matriz = base + letras, y arma el config
+  // para mostrarSelectorVariante usando la descripcion (columna Matriz) como
+  // etiqueta. Devuelve null si el numero no tiene variantes con letra (flujo
+  // normal, sin popup). Las variantes "curadas" (MATRICES_CON_VARIANTE) tienen
+  // prioridad sobre esta deteccion automatica.
+  function detectarVariantesMatriz(base) {
+    const b = String(base || "").trim();
+    if (!/^[0-9]+$/.test(b)) return null;
+    // base seguido SOLO de letras: 101 -> 101B (termina en letras),
+    // pero NO 1010/1011 (les sigue un digito, no una letra).
+    const re = new RegExp("^" + b + "[A-Za-z]+$");
+    const variantes = [];
+    for (const nm of matricesMap.keys()) {
+      if (re.test(nm)) variantes.push(nm);
+    }
+    if (!variantes.length) return null;
+    const codigos = matricesMap.has(b) ? [b, ...variantes] : variantes.slice();
+    codigos.sort((x, y) => {
+      if (x === b) return -1;
+      if (y === b) return 1;
+      return x.localeCompare(y, "es");
+    });
+    const opciones = codigos.map((nm) => {
+      const desc = String(matricesMap.get(nm)?.Matriz || "").trim();
+      return { label: desc ? nm + " - " + desc : nm, matriz: nm, nombre: desc || null };
+    });
+    return { pregunta: "Matriz " + b + " - Elegi la variante:", opciones };
   }
 
   /* ================= OPCIONES ================= */
@@ -2035,10 +2068,13 @@ document.addEventListener("DOMContentLoaded", () => {
         alert("Antes de iniciar una nueva matriz (E), envia al menos 1 Cajon (C).");
         return;
       }
-      if (!matricesMap.has(texto)) {
-        alert(`La matriz ${texto} no existe. Verifica el numero.`);
-        return;
-      }
+      // (v1.8.60) Reset de estado de variante en cada arranque de matriz: asi el
+      // popup vuelve a aparecer para CADA matriz nueva (antes _varianteYaElegida
+      // quedaba pegado en true tras la 1ra matriz con variante y no reaparecia).
+      _varianteYaElegida = false;
+      _nombreMatrizOverride = null;
+      // (La validacion "matriz no existe" se hace mas abajo, junto con la deteccion
+      // de variantes, para no rechazar numeros cuyas unicas variantes tienen letra.)
       // matrices con variante: al iniciar E se elige el tipo (cambia el codigo de matriz)
       const MATRICES_CON_VARIANTE = {
         "12": {
@@ -2101,9 +2137,17 @@ document.addEventListener("DOMContentLoaded", () => {
           ],
         },
       };
-      if (MATRICES_CON_VARIANTE[texto] && !_varianteYaElegida) {
-        const cfg = MATRICES_CON_VARIANTE[texto];
-        const varianteElegida = await mostrarSelectorVariante(cfg.pregunta, cfg.opciones);
+      // (v1.8.60) Config del selector: primero la lista curada (etiquetas a mano);
+      // si el numero base no esta ahi, se detectan las variantes dinamicamente
+      // desde la BD (cualquier N_Matriz = numero base + letras).
+      const cfgVariante = MATRICES_CON_VARIANTE[texto] || detectarVariantesMatriz(texto);
+      // Rechaza solo si el numero no existe como matriz NI tiene variantes con letra.
+      if (!matricesMap.has(texto) && !cfgVariante) {
+        alert(`La matriz ${texto} no existe. Verifica el numero.`);
+        return;
+      }
+      if (cfgVariante && !_varianteYaElegida) {
+        const varianteElegida = await mostrarSelectorVariante(cfgVariante.pregunta, cfgVariante.opciones);
         if (!varianteElegida) return;
         texto = varianteElegida.matriz;
         textInput.value = texto;
