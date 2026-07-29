@@ -288,7 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.62";
+  const LOCAL_VERSION = "v1.8.63";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -2461,11 +2461,13 @@ document.addEventListener("DOMContentLoaded", () => {
   // Reemplaza el auto-seleccionar Cambiar Matriz del flujo Rotura para esas matrices.
   async function popupAlimentadorCajon(legajo, opts) {
     const desdeRotura = !!(opts && opts.desdeRotura);
-    // (v1.8.62) En el flujo de rotura el operario no "sigue produciendo" (la matriz
-    // esta rota): tipicamente hace movimientos / ordena cajones mientras matriceria
-    // saca, repara y recoloca la MISMA matriz. Por eso el texto cambia segun el origen.
+    // (v1.8.63) En el flujo de rotura el operario no "sigue produciendo" (la matriz
+    // esta rota): al elegir "No cambiar matriz" vuelve al menu y hace lo que necesite
+    // -un MOV, ordenar cajones, o ir a un balancin (que es un NUEVO E / empezar matriz,
+    // no un MOV)- mientras matriceria saca, repara y recoloca la matriz. Por eso la
+    // etiqueta queda neutra y NO menciona movimientos.
     const titulo = desdeRotura ? "Rotura registrada. ¿Que queres hacer?" : "Cajon cerrado. ¿Que queres hacer?";
-    const labelSeguir = desdeRotura ? "No cambiar matriz (movimientos)" : "Continuar Produciendo";
+    const labelSeguir = desdeRotura ? "No cambiar matriz" : "Continuar Produciendo";
     const el = await mostrarSelectorVariante(titulo, [
       { label: labelSeguir, val: "SEGUIR" },
       { label: "Cambiar Matriz", val: "CM" }
