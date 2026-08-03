@@ -74,6 +74,10 @@ document.addEventListener("DOMContentLoaded", () => {
   let _varianteYaElegida = false;
   let _lastPreviewMatriz = null;     // (v1.8.40) ultima matriz consultada en preview de E
 
+  // (v1.8.64) Activo es texto "SI"/"NO". Solo "NO" cuenta como baja: cualquier otro
+  // valor (o vacio) se toma como activo para no cambiar quien puede entrar hoy.
+  const esEmpleadoActivo = (e) => String(e?.Activo || "").trim().toUpperCase() !== "NO";
+
   async function cargarCatalogos() {
     const [empRes, matRes, stockRes, balRes] = await Promise.all([
       sb.from("Empleados").select("*"),
@@ -82,9 +86,18 @@ document.addEventListener("DOMContentLoaded", () => {
       sb.from("Balancines").select("*")
     ]);
     if (empRes.data) {
+      // (v1.8.64) Legajo NO es unico en Empleados (ej. 282: Ivan Dantova de baja +
+      // Oscar Bordon activo). Como no hay ORDER BY, el ganador dependia del orden
+      // fisico de la tabla: un UPDATE sobre la fila vieja la manda al final del heap
+      // y el operario activo perdia su nombre Y sus capacidades (botones). Ahora ante
+      // legajo repetido gana siempre el ACTIVO; si ninguno lo esta, queda el ultimo
+      // (igual que antes, para no dejar afuera legajos que solo tienen filas de baja).
       empRes.data.forEach(e => {
         const leg = String(e.Legajo || "").trim();
-        if (leg) empleadosMap.set(leg, e);
+        if (!leg) return;
+        const prev = empleadosMap.get(leg);
+        if (prev && esEmpleadoActivo(prev) && !esEmpleadoActivo(e)) return;
+        empleadosMap.set(leg, e);
       });
     }
     if (matRes.data) {
@@ -288,7 +301,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.63";
+  const LOCAL_VERSION = "v1.8.64";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -834,6 +847,9 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const destinoCM = op === "CM" ? String(item.texto || item.matriz || "").trim() : "";
+      // (v1.8.64) CTM viaja con la matriz controlada en texto (igual que CM): dejarla
+      // visible en Nombre_Matriz, si no el TM queda como "Control Matriz" a secas.
+      const matrizCTM = op === "CTM" ? String(item.texto || item.matriz || "").trim() : "";
       const nombreBase = esCajon ? (item.nombreOverride || nombreMatriz) : "";
       const row = {
         Fecha: tsEvent,
@@ -844,7 +860,9 @@ document.addEventListener("DOMContentLoaded", () => {
           ? (cont ? `[CONT] ${nombreBase}`.trim() : nombreBase)
           : (op === "CM" && destinoCM
               ? `Cambiar Matriz a ${destinoCM}`
-              : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion)),
+              : (op === "CTM" && matrizCTM
+                  ? `Control Matriz ${matrizCTM}`
+                  : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion))),
         Matriz: esCajon ? matNum : (esRM_PM_RD_LT ? matNum : op),
         Uni: uni,
         Premio: premio,
@@ -1029,6 +1047,9 @@ document.addEventListener("DOMContentLoaded", () => {
     { code: "LIMP", desc: "Limpieza", row: 2, input: { show: false } },
     { code: "Perm", desc: "Permiso", row: 2, input: { show: false } },
     { code: "AL", desc: "Ayuda Logistica", row: 3, input: { show: false } },
+    // (v1.8.64) Apoyo a matriceria para operarios de produccion (ej. Oscar Bordon, leg 282).
+    // AM: tiempo muerto simple, sin input. Se muestra si ve_am === true.
+    { code: "AM", desc: "Ayuda Matriceria", row: 3, input: { show: false } },
     { code: "PR", desc: "Pare Carga Rollo", row: 3, input: { show: false } },
     { code: "PC", desc: "Pare Comida", row: 3, input: { show: false } },
     { code: "RD", desc: "Rollo Fleje Doblado", row: 3, input: { show: false } },
@@ -1037,6 +1058,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // tareas de matriceria (ej. David Ayala). Se muestra si ve_mm === true.
     { code: "MM", desc: "Movimiento Matriceria", row: 3, input: { show: false } },
     { code: "CM", desc: "Cambiar Matriz", row: 4, input: { show: true, label: "Numero matriz nueva", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
+    // (v1.8.64) CTM: 1er toque pide la matriz controlada, 2do cierra (tiempo muerto),
+    // igual que TRM. Se muestra si ve_ctm === true. NO abre el modal de balancin (eso es CM).
+    { code: "CTM", desc: "Control Matriz", row: 4, input: { show: true, label: "Numero matriz", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
     { code: "PM", desc: "Pare Matriz", row: 4, input: { show: false } },
     { code: "RM", desc: "Rotura Matriz", row: 4, input: { show: false } },
     { code: "REM", desc: "Reparando Matriz", row: 4, input: { show: false } },
@@ -1070,7 +1094,9 @@ document.addEventListener("DOMContentLoaded", () => {
       trm: e.ve_trm === true,
       tl: e.ve_tl === true,
       rem: e.ve_rem === true,
-      mm: e.ve_mm === true       // (v1.8.59) Movimiento Matriceria (piedra + matriceria)
+      mm: e.ve_mm === true,      // (v1.8.59) Movimiento Matriceria (piedra + matriceria)
+      ctm: e.ve_ctm === true,    // (v1.8.64) Control Matriz (operario de produccion)
+      am: e.ve_am === true       // (v1.8.64) Ayuda Matriceria (operario de produccion)
     };
   }
   function puedeCM(legajo) { return capsDe(legajo).cm; }
@@ -1087,6 +1113,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (code === "MOV P") return caps.piedra;
     if (code === "MM") return caps.mm;   // (v1.8.59) piedra que tambien hace matriceria
     if (code === "CM") return caps.cm;
+    if (code === "CTM") return caps.ctm; // (v1.8.64) apoyo a matriceria, sin dejar de producir
+    if (code === "AM") return caps.am;   // (v1.8.64) idem
     if (code === "PR" || code === "RD") return caps.pr_rd;
     if (code === "TRM" || code === "TL" || code === "REM") return false;
     return NORMAL_BASE.has(code);
@@ -1630,9 +1658,9 @@ document.addEventListener("DOMContentLoaded", () => {
     errorEl.innerText = "";
     textInput.value = "";
 
-    // CM / TRM: 2da pulsacion cierra el TM, no pide input (v1.8.54: incluye TRM)
+    // CM / TRM: 2da pulsacion cierra el TM, no pide input (v1.8.54: incluye TRM; v1.8.64: CTM)
     const stateSel = readState(legajoKey());
-    const cmCerrando = (opt.code === "CM" || opt.code === "TRM") && stateSel?.lastDowntime?.opcion === opt.code;
+    const cmCerrando = (opt.code === "CM" || opt.code === "TRM" || opt.code === "CTM") && stateSel?.lastDowntime?.opcion === opt.code;
 
     if (opt.input.show && !cmCerrando) {
       inputArea.classList.remove("hidden");
@@ -2175,7 +2203,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
       }
     }
-    if (selected.code === "CM" || selected.code === "TRM") {
+    if (selected.code === "CM" || selected.code === "TRM" || selected.code === "CTM") {
       if (!matricesMap.has(texto)) {
         alert(`La matriz ${texto} no existe. Verifica el numero.`);
         return;
