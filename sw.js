@@ -1,4 +1,4 @@
-const CACHE_VERSION = "v1.8.64";
+const CACHE_VERSION = "v1.8.65";
 
 const SUPABASE_URL = "https://hrxfctzncixxqmpfhskv.supabase.co";
 const SUPABASE_KEY = "sb_publishable_BqpAgZH6ty-9wft10_YMhw_0rcIPuWT";

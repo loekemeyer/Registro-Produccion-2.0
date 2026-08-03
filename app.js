@@ -301,7 +301,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.8.64";
+  const LOCAL_VERSION = "v1.8.65";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -847,9 +847,6 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const destinoCM = op === "CM" ? String(item.texto || item.matriz || "").trim() : "";
-      // (v1.8.64) CTM viaja con la matriz controlada en texto (igual que CM): dejarla
-      // visible en Nombre_Matriz, si no el TM queda como "Control Matriz" a secas.
-      const matrizCTM = op === "CTM" ? String(item.texto || item.matriz || "").trim() : "";
       const nombreBase = esCajon ? (item.nombreOverride || nombreMatriz) : "";
       const row = {
         Fecha: tsEvent,
@@ -860,9 +857,7 @@ document.addEventListener("DOMContentLoaded", () => {
           ? (cont ? `[CONT] ${nombreBase}`.trim() : nombreBase)
           : (op === "CM" && destinoCM
               ? `Cambiar Matriz a ${destinoCM}`
-              : (op === "CTM" && matrizCTM
-                  ? `Control Matriz ${matrizCTM}`
-                  : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion))),
+              : (esRM_PM_RD_LT ? `${op} ${matNum}` : item.descripcion)),
         Matriz: esCajon ? matNum : (esRM_PM_RD_LT ? matNum : op),
         Uni: uni,
         Premio: premio,
@@ -1048,7 +1043,8 @@ document.addEventListener("DOMContentLoaded", () => {
     { code: "Perm", desc: "Permiso", row: 2, input: { show: false } },
     { code: "AL", desc: "Ayuda Logistica", row: 3, input: { show: false } },
     // (v1.8.64) Apoyo a matriceria para operarios de produccion (ej. Oscar Bordon, leg 282).
-    // AM: tiempo muerto simple, sin input. Se muestra si ve_am === true.
+    // AM y CTM solo miden tiempo: sin input, 1er toque abre y 2do cierra (como PB).
+    // Se muestran segun ve_am / ve_ctm.
     { code: "AM", desc: "Ayuda Matriceria", row: 3, input: { show: false } },
     { code: "PR", desc: "Pare Carga Rollo", row: 3, input: { show: false } },
     { code: "PC", desc: "Pare Comida", row: 3, input: { show: false } },
@@ -1058,9 +1054,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // tareas de matriceria (ej. David Ayala). Se muestra si ve_mm === true.
     { code: "MM", desc: "Movimiento Matriceria", row: 3, input: { show: false } },
     { code: "CM", desc: "Cambiar Matriz", row: 4, input: { show: true, label: "Numero matriz nueva", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
-    // (v1.8.64) CTM: 1er toque pide la matriz controlada, 2do cierra (tiempo muerto),
-    // igual que TRM. Se muestra si ve_ctm === true. NO abre el modal de balancin (eso es CM).
-    { code: "CTM", desc: "Control Matriz", row: 4, input: { show: true, label: "Numero matriz", placeholder: "Ej: 110", validate: /^[0-9]+$/ } },
+    // (v1.8.64) CTM: solo mide tiempo (ver AM arriba). No pide matriz ni abre el modal
+    // de balancin: eso es CM, que va aparte aunque el operario tenga las dos.
+    { code: "CTM", desc: "Control Matriz", row: 4, input: { show: false } },
     { code: "PM", desc: "Pare Matriz", row: 4, input: { show: false } },
     { code: "RM", desc: "Rotura Matriz", row: 4, input: { show: false } },
     { code: "REM", desc: "Reparando Matriz", row: 4, input: { show: false } },
@@ -1658,9 +1654,9 @@ document.addEventListener("DOMContentLoaded", () => {
     errorEl.innerText = "";
     textInput.value = "";
 
-    // CM / TRM: 2da pulsacion cierra el TM, no pide input (v1.8.54: incluye TRM; v1.8.64: CTM)
+    // CM / TRM: 2da pulsacion cierra el TM, no pide input (v1.8.54: incluye TRM)
     const stateSel = readState(legajoKey());
-    const cmCerrando = (opt.code === "CM" || opt.code === "TRM" || opt.code === "CTM") && stateSel?.lastDowntime?.opcion === opt.code;
+    const cmCerrando = (opt.code === "CM" || opt.code === "TRM") && stateSel?.lastDowntime?.opcion === opt.code;
 
     if (opt.input.show && !cmCerrando) {
       inputArea.classList.remove("hidden");
@@ -2203,7 +2199,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
       }
     }
-    if (selected.code === "CM" || selected.code === "TRM" || selected.code === "CTM") {
+    if (selected.code === "CM" || selected.code === "TRM") {
       if (!matricesMap.has(texto)) {
         alert(`La matriz ${texto} no existe. Verifica el numero.`);
         return;
