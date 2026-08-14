@@ -2554,15 +2554,18 @@ document.addEventListener("DOMContentLoaded", () => {
   // Popup con lista de rollos disponibles de un fleje. Devuelve {id, nFleje, kg_actual} o null.
   function mostrarSelectorRollo(nFleje) {
     return new Promise(async (resolve) => {
-      let rollos = [];
+      let rollosDisp = [], rollosEnUso = [];
       try {
         const { data } = await sb
           .from("Flejes_Entradas")
-          .select("id, kg, kg_actual, n_orden, created_at")
+          .select("id, kg, kg_actual, n_orden, created_at, estado, en_uso_por")
           .eq("N_Fleje", nFleje)
-          .eq("estado", "disponible")
+          .in("estado", ["disponible", "en_uso"])
           .order("created_at", { ascending: true });
-        rollos = data || [];
+        (data || []).forEach(r => {
+          if (r.estado === "en_uso") rollosEnUso.push(r);
+          else rollosDisp.push(r);
+        });
       } catch (e) { console.error("[selectorRollo]", e); }
 
       const overlay = document.createElement("div");
@@ -2575,13 +2578,15 @@ document.addEventListener("DOMContentLoaded", () => {
       title.textContent = `Fleje ${nFleje} — Selecciona el rollo`;
       modal.appendChild(title);
 
-      if (!rollos.length) {
+      const totalRollos = rollosDisp.length + rollosEnUso.length;
+      if (!totalRollos) {
         const msg = document.createElement("p");
         msg.style.cssText = "color:#555;text-align:center;margin:12px 0";
         msg.textContent = "No hay rollos disponibles para este fleje.";
         modal.appendChild(msg);
       } else {
-        rollos.forEach(r => {
+        // Rollos disponibles
+        rollosDisp.forEach(r => {
           const kg = r.kg_actual != null ? r.kg_actual : r.kg;
           const btn = document.createElement("button");
           btn.style.cssText = "display:block;width:100%;padding:14px 16px;margin-bottom:8px;border:2px solid #c9d1d9;border-radius:12px;font-size:18px;cursor:pointer;background:#f9fafb;text-align:left";
@@ -2590,6 +2595,25 @@ document.addEventListener("DOMContentLoaded", () => {
           btn.onclick = () => { overlay.remove(); resolve({ id: r.id, nFleje, kg_actual: kg }); };
           modal.appendChild(btn);
         });
+        // Rollos en máquina (en_uso por otro legajo) — permite tomar el relevo
+        if (rollosEnUso.length) {
+          if (rollosDisp.length) {
+            const sep = document.createElement("p");
+            sep.style.cssText = "font-size:13px;color:#888;text-align:center;margin:10px 0 6px";
+            sep.textContent = "— En máquina —";
+            modal.appendChild(sep);
+          }
+          rollosEnUso.forEach(r => {
+            const kg = r.kg_actual != null ? r.kg_actual : r.kg;
+            const btn = document.createElement("button");
+            btn.style.cssText = "display:block;width:100%;padding:14px 16px;margin-bottom:8px;border:2px solid #f59e0b;border-radius:12px;font-size:18px;cursor:pointer;background:#fffbeb;text-align:left";
+            btn.innerHTML = "🔄 <b>" + Number(kg).toLocaleString("es-AR", {maximumFractionDigits:1}) + " kg</b>" +
+              "&nbsp;<span style=\"color:#b45309;font-size:14px\">En máquina" +
+              (r.en_uso_por ? " · Leg. " + r.en_uso_por : "") + "</span>";
+            btn.onclick = () => { overlay.remove(); resolve({ id: r.id, nFleje, kg_actual: kg }); };
+            modal.appendChild(btn);
+          });
+        }
       }
 
       const btnCancel = document.createElement("button");
