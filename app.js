@@ -323,7 +323,8 @@ document.addEventListener("DOMContentLoaded", () => {
       matrixNeedsC: false, pcDone: false,
       cajonContinuado: null,        // si el operario continuo cajon del dia anterior, info aca
       continuacionConsultada: false, // flag para no preguntar 2 veces en el mismo dia
-      pendingRM: null                // (v1.8.47) flujo Rotura Matriz a medias (persiste F5)
+      pendingRM: null,               // (v1.8.47) flujo Rotura Matriz a medias (persiste F5)
+      rolloActual: null              // fleje en uso por alimentador (persiste via Supabase)
     };
   }
 
@@ -344,6 +345,7 @@ document.addEventListener("DOMContentLoaded", () => {
       s.tdCargaPreviaListo = !!s.tdCargaPreviaListo;
       s.tdCargaPreviaInfo = s.tdCargaPreviaInfo || null;
       s.pendingRM = s.pendingRM || null;
+      s.rolloActual = s.rolloActual || null;
       return s;
     } catch { return freshState(); }
   }
@@ -1609,6 +1611,8 @@ document.addEventListener("DOMContentLoaded", () => {
     // (v1.8.47) Si quedo un flujo Rotura Matriz a medias (ej: se actualizo con F5),
     // retomarlo: reexige la cantidad si no se cargo, o reabre Cambiar Matriz.
     resumirFlujoRMSiHace(leg);
+    // Alimentador: restaurar rollo en uso desde Supabase (persiste entre días)
+    restaurarRolloDesdeSupabase(leg).catch(e => console.error("[restaurarRollo]", e));
   }
 
   function backToLegajo() {
@@ -2048,6 +2052,12 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // PR: al CERRAR (2do toque), gestionar estado del rollo (Flejes_Entradas).
+    if (selected.code === "PR" && stateBefore.lastDowntime && stateBefore.lastDowntime.opcion === "PR") {
+      await manejarCierrePR(legajo);
+      return;
+    }
+
     if (selected.input.show) {
       let ok;
       if (selected.code === "C" && isMatrix501(stateBefore)) {
@@ -2272,6 +2282,20 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     renderSummary();
 
+    // Alimentador E: si no tiene rollo asignado, pedir uno ahora (fleje de la matriz).
+    if (payload.opcion === "E" && esAlimentador(payload.texto)) {
+      const sE = readState(legajo);
+      if (!sE.rolloActual) {
+        selected = null;
+        selectedArea.classList.add("hidden");
+        errorEl.innerText = "";
+        document.querySelectorAll(".box.selected").forEach(x => x.classList.remove("selected"));
+        btnEnviar.disabled = false; btnEnviar.innerText = "Enviar";
+        try { await flushQueue(); } catch (_e) {}
+        await asignarRolloParaMatriz(legajo, payload.texto);
+      }
+    }
+
     // (v1.8.40) Registrar las unidades del cajon en el stock compartido (si aplica).
     // Idempotente por payload.id; si falla queda encolado para reintento.
     if (payload.opcion === "C" && stockActivo(payload.matriz)) {
@@ -2485,6 +2509,242 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // Cierra el TM de la consulta PCM (carga en PCM todo el tiempo desde que se abrio).
+  /* ================= ALIMENTADOR: ROLLOS DE FLEJE ================= */
+
+  // Busca qué N° de Fleje usa una matriz en Causa-Efecto (Descuenta = "Fleje N").
+  async function flejeDeMatriz(matrizNum) {
+    const m = matricesMap.get(String(matrizNum).trim());
+    if (!m || !m.Matriz) return null;
+    try {
+      const { data } = await sb
+        .from("Causa-Efecto")
+        .select('"Descuenta"')
+        .eq("Matriz", m.Matriz)
+        .ilike("Descuenta", "Fleje%")
+        .limit(1)
+        .maybeSingle();
+      if (!data) return null;
+      const match = String(data.Descuenta || "").match(/^Fleje\s+(\S+)/i);
+      return match ? match[1].trim() : null;
+    } catch { return null; }
+  }
+
+  // Al iniciar sesión, restaura el rollo en uso desde Supabase (persiste entre días).
+  async function restaurarRolloDesdeSupabase(legajo) {
+    const s = readState(legajo);
+    if (s.rolloActual) return;
+    try {
+      const { data } = await sb
+        .from("Flejes_Entradas")
+        .select("id, \"N_Fleje\", kg_actual, kg")
+        .eq("estado", "en_uso")
+        .eq("en_uso_por", String(legajo))
+        .maybeSingle();
+      if (!data) return;
+      const s2 = readState(legajo);
+      s2.rolloActual = {
+        id: data.id,
+        nFleje: String(data["N_Fleje"] || ""),
+        kg_actual: data.kg_actual != null ? data.kg_actual : (data.kg || 0)
+      };
+      writeState(legajo, s2);
+    } catch (e) { console.error("[restaurarRollo]", e); }
+  }
+
+  // Popup con lista de rollos disponibles de un fleje. Devuelve {id, nFleje, kg_actual} o null.
+  function mostrarSelectorRollo(nFleje) {
+    return new Promise(async (resolve) => {
+      let rollos = [];
+      try {
+        const { data } = await sb
+          .from("Flejes_Entradas")
+          .select("id, kg, kg_actual, n_orden, created_at")
+          .eq("N_Fleje", nFleje)
+          .eq("estado", "disponible")
+          .order("created_at", { ascending: true });
+        rollos = data || [];
+      } catch (e) { console.error("[selectorRollo]", e); }
+
+      const overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box";
+      const modal = document.createElement("div");
+      modal.style.cssText = "background:#fff;border-radius:20px;padding:24px;max-width:420px;width:100%;max-height:85vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)";
+
+      const title = document.createElement("p");
+      title.style.cssText = "font-size:20px;font-weight:800;margin:0 0 14px;text-align:center";
+      title.textContent = `Fleje ${nFleje} — Selecciona el rollo`;
+      modal.appendChild(title);
+
+      if (!rollos.length) {
+        const msg = document.createElement("p");
+        msg.style.cssText = "color:#555;text-align:center;margin:12px 0";
+        msg.textContent = "No hay rollos disponibles para este fleje.";
+        modal.appendChild(msg);
+      } else {
+        rollos.forEach(r => {
+          const kg = r.kg_actual != null ? r.kg_actual : r.kg;
+          const btn = document.createElement("button");
+          btn.style.cssText = "display:block;width:100%;padding:14px 16px;margin-bottom:8px;border:2px solid #c9d1d9;border-radius:12px;font-size:18px;cursor:pointer;background:#f9fafb;text-align:left";
+          btn.innerHTML = "<b>" + Number(kg).toLocaleString("es-AR", {maximumFractionDigits:1}) + " kg</b>" +
+            (r.n_orden ? "&nbsp;<span style=\"color:#888;font-size:14px\">OC " + r.n_orden + "</span>" : "");
+          btn.onclick = () => { overlay.remove(); resolve({ id: r.id, nFleje, kg_actual: kg }); };
+          modal.appendChild(btn);
+        });
+      }
+
+      const btnCancel = document.createElement("button");
+      btnCancel.textContent = "Cancelar";
+      btnCancel.style.cssText = "display:block;width:100%;padding:12px;border:none;border-radius:12px;font-size:16px;cursor:pointer;background:#f3f4f6;color:#555;margin-top:4px";
+      btnCancel.onclick = () => { overlay.remove(); resolve(null); };
+      modal.appendChild(btnCancel);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+    });
+  }
+
+  // Popup para ingresar los KG restantes en el rollo. Devuelve número o null si cancela.
+  function pedirKgRestantes() {
+    return new Promise((resolve) => {
+      const overlay = document.createElement("div");
+      overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center";
+      const modal = document.createElement("div");
+      modal.style.cssText = "background:#fff;border-radius:20px;padding:32px 24px;max-width:400px;width:92%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.3)";
+
+      const titulo = document.createElement("p");
+      titulo.style.cssText = "font-size:22px;font-weight:800;margin:0 0 16px;line-height:1.25";
+      titulo.textContent = "¿Cuántos kg le quedan al rollo?";
+      modal.appendChild(titulo);
+
+      const input = document.createElement("input");
+      input.type = "text"; input.inputMode = "decimal"; input.placeholder = "Ej: 45,5";
+      input.style.cssText = "width:100%;box-sizing:border-box;padding:16px;font-size:26px;text-align:center;border:2px solid #c9d1d9;border-radius:14px;margin-bottom:10px";
+      modal.appendChild(input);
+
+      const err = document.createElement("div");
+      err.style.cssText = "color:#dc2626;font-size:14px;min-height:16px;margin-bottom:12px";
+      modal.appendChild(err);
+
+      const confirmar = () => {
+        const v = String(input.value || "").trim().replace(",", ".");
+        const num = parseFloat(v);
+        if (isNaN(num) || num < 0) { err.textContent = "Ingresa un número válido (ej: 45,5)"; return; }
+        overlay.remove(); resolve(num);
+      };
+      const btnOk = document.createElement("button");
+      btnOk.textContent = "Confirmar";
+      btnOk.style.cssText = "display:block;width:100%;padding:18px;border:1px solid #1aa34a;border-radius:14px;font-size:22px;font-weight:800;cursor:pointer;background:#eafff1;color:#0b6b2c;margin-bottom:8px";
+      btnOk.onclick = confirmar;
+      input.addEventListener("keydown", e => { if (e.key === "Enter") confirmar(); });
+      modal.appendChild(btnOk);
+
+      const btnCancel = document.createElement("button");
+      btnCancel.textContent = "Cancelar";
+      btnCancel.style.cssText = "display:block;width:100%;padding:12px;border:none;border-radius:12px;font-size:16px;cursor:pointer;background:#f3f4f6;color:#555";
+      btnCancel.onclick = () => { overlay.remove(); resolve(null); };
+      modal.appendChild(btnCancel);
+
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      setTimeout(() => { try { input.focus(); } catch (_) {} }, 50);
+    });
+  }
+
+  // Consulta el fleje de una matriz y muestra el selector de rollos disponibles.
+  async function asignarRolloParaMatriz(legajo, matrizNum) {
+    const nFleje = await flejeDeMatriz(matrizNum);
+    if (!nFleje) return; // sin fleje en CE: no bloquear
+    const rollo = await mostrarSelectorRollo(nFleje);
+    if (!rollo) return;
+    try {
+      await sb.rpc("asignar_fleje_operario", {
+        p_entrada_id: rollo.id,
+        p_legajo: String(legajo),
+        p_matriz: String(matrizNum)
+      });
+    } catch (e) { console.error("[asignarRolloParaMatriz]", e); return; }
+    const s = readState(legajo);
+    s.rolloActual = rollo;
+    writeState(legajo, s);
+  }
+
+  // Cierra el evento PR (igual que cerrarPCM pero para "Pare Carga Rollo").
+  function cerrarPR(legajo) {
+    const s = readState(legajo);
+    const dt = s.lastDowntime;
+    const cierre = {
+      id: uuidv4(), legajo, opcion: "PR", descripcion: "Pare Carga Rollo",
+      texto: "", ts_event: isoNow(),
+      hs_inicio: (dt && dt.opcion === "PR") ? (dt.ts || "") : "", matriz: ""
+    };
+    updateStateAfterSend(legajo, cierre); // sameDowntime(PR,PR) => cierra lastDowntime
+    enqueue(cierre);
+    renderSummary();
+  }
+
+  // Interceptor al CERRAR PR (2do toque): pregunta estado del rollo y actualiza Flejes_Entradas.
+  async function manejarCierrePR(legajo) {
+    const s = readState(legajo);
+    const rolloActual = s.rolloActual || null;
+
+    // Paso 1: ¿Se terminó el rollo?
+    const termino = await mostrarSelectorVariante("¿Terminaste el rollo?", [
+      { label: "Sí, se terminó", val: "SI" },
+      { label: "No, todavía tiene material", val: "NO" },
+    ]);
+    if (!termino) return; // canceló: PR queda abierto
+
+    if (termino.val === "NO") {
+      // Rollo no terminado: registrar KG restantes y devolver a disponible
+      const kgRestantes = await pedirKgRestantes();
+      if (kgRestantes === null) return; // canceló: PR queda abierto
+      if (rolloActual) {
+        try {
+          await sb.rpc("liberar_fleje", { p_entrada_id: rolloActual.id, p_kg_restante: kgRestantes });
+        } catch (e) { console.error("[liberarFleje]", e); }
+      }
+      const s2 = readState(legajo);
+      s2.rolloActual = null;
+      writeState(legajo, s2);
+
+    } else {
+      // Rollo terminado: marcar consumido
+      if (rolloActual) {
+        try {
+          await sb.rpc("liberar_fleje", { p_entrada_id: rolloActual.id, p_kg_restante: 0 });
+        } catch (e) { console.error("[liberarFleje]", e); }
+      }
+      const s2 = readState(legajo);
+      s2.rolloActual = null;
+      writeState(legajo, s2);
+
+      // Paso 2: ¿Nuevo rollo del mismo fleje o cambia de fleje/matriz?
+      const siguiente = await mostrarSelectorVariante("¿Qué vas a hacer?", [
+        { label: rolloActual ? "Nuevo rollo — Fleje " + rolloActual.nFleje : "Cargar nuevo rollo", val: "MISMO" },
+        { label: "Cambio de fleje / matriz", val: "CAMBIO" },
+      ]);
+      if (siguiente && siguiente.val === "MISMO" && rolloActual) {
+        const nuevoRollo = await mostrarSelectorRollo(rolloActual.nFleje);
+        if (nuevoRollo) {
+          try {
+            await sb.rpc("asignar_fleje_operario", {
+              p_entrada_id: nuevoRollo.id,
+              p_legajo: String(legajo),
+              p_matriz: readState(legajo).lastMatrix?.texto || ""
+            });
+          } catch (e) { console.error("[asignarNuevoRollo]", e); }
+          const s3 = readState(legajo);
+          s3.rolloActual = nuevoRollo;
+          writeState(legajo, s3);
+        }
+      }
+      // Si CAMBIO: rolloActual queda null; próximo E pide el fleje nuevo
+    }
+
+    cerrarPR(legajo);
+    volverAInicio();
+    try { await flushQueue(); await flushStockQueue(); } catch (_e) {}
+  }
+
   function cerrarPCM(legajo) {
     const s = readState(legajo);
     const dt = s.lastDowntime;
