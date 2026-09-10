@@ -9,14 +9,84 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="theme-color" content="#1e40af" />
   <title>Registro Produccion</title>
-  <link rel="stylesheet" href="styles.css?v=1.8.59" />
+  <link rel="stylesheet" href="styles.css?v=1.9.0" />
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.json" />
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <!-- Anti-flash: la pantalla queda oculta hasta que el gate confirme sesión. -->
+  <style>#legajoScreen{visibility:hidden;}</style>
+  <!-- ===== GATE DE SESIÓN (v1.9.0) =====
+       El login es GLOBAL y vive en la raíz de Gestión (`../`). Esta app corre en
+       dos lugares y el gate se adapta solo:
+         · como sub-app (`/cervantes/` de Gestión Virgilio) → sin sesión vuelve al
+           login global, porque el operario ya entró por ahí;
+         · como repo propio (URL suelta) → no hay login "arriba", así que sin
+           sesión se cae a la pantalla de legajo de siempre (nadie queda afuera).
+       Con sesión (Google autorizada o sesión por legajo del día, compartidas: es
+       el mismo origin y el mismo proyecto Supabase) NO se vuelve a pedir el
+       legajo: se precarga y se saluda, igual que Virgilio. -->
+  <script>
+  (function cervGate() {
+    var SB_URL  = "https://hrxfctzncixxqmpfhskv.supabase.co";
+    var SB_ANON = "sb_publishable_BqpAgZH6ty-9wft10_YMhw_0rcIPuWT";
+    var SUPERVISOR_EMAILS = ["loekemeyer.n8n@gmail.com", "loekemeyer.logistica@gmail.com", "comexloekemeyer@gmail.com"];
+    var LEGAJO_KEY = "vir_legajo_auth"; // sesión por legajo compartida con la raíz
+    var EN_SUBAPP  = /\/cervantes\//.test(window.location.pathname);
+    function todayBsAs() { var d = new Date(Date.now() - 3 * 3600 * 1000); return d.toISOString().slice(0, 10); }
+    function reveal() { var s = document.getElementById("legajoScreen"); if (s) s.style.visibility = "visible"; }
+    // Sin sesión: como sub-app se vuelve al login global; suelta, pantalla de legajo.
+    function sinSesion() { if (EN_SUBAPP) window.location.replace("../"); else reveal(); }
+    // Operario ya logueado: NO re-pedimos el legajo. Lo precargamos (oculto, para
+    // el resto del código) y mostramos un saludo, igual que Virgilio.
+    function prefill(legajo, nombre) {
+      var i = document.getElementById("legajoInput");
+      if (i && legajo) {
+        i.value = legajo;
+        i.style.display = "none";
+        try { i.dispatchEvent(new Event("input", { bubbles: true })); } catch (_e) {}
+      }
+      var ls = document.getElementById("legajoScreen");
+      var h1 = ls ? ls.querySelector("h1") : null;
+      if (h1) h1.textContent = nombre ? ("Hola, " + nombre) : ("Legajo " + legajo);
+      reveal();
+    }
+    function fetchEmpByEmail(email) {
+      return fetch(SB_URL + "/rest/v1/Empleados?email=eq." + encodeURIComponent(email.toLowerCase().trim()) + "&select=Legajo,Empleado&limit=1",
+        { headers: { apikey: SB_ANON, Authorization: "Bearer " + SB_ANON } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (Array.isArray(d) && d.length && d[0].Legajo != null) {
+            return { legajo: String(d[0].Legajo).trim(), nombre: String(d[0].Empleado || "").trim() };
+          }
+          return null;
+        })
+        .catch(function () { return null; });
+    }
+    function run() {
+      // 1) Sesión por legajo (sin Google), compartida con la raíz, válida el día.
+      try {
+        var raw = localStorage.getItem(LEGAJO_KEY);
+        if (raw) { var o = JSON.parse(raw); if (o && o.legajo && o.day === todayBsAs()) { prefill(o.legajo, o.nombre); return; } }
+      } catch (_e) {}
+      // 2) Sesión Google (mismo proyecto, storageKey default → compartida).
+      if (typeof supabase === "undefined") { sinSesion(); return; }
+      var sbAuth = supabase.createClient(SB_URL, SB_ANON, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false } });
+      sbAuth.auth.getSession().then(function (res) {
+        var s = res && res.data ? res.data.session : null;
+        if (!s || !s.user || !s.user.email) { sinSesion(); return; }
+        var email = s.user.email;
+        if (SUPERVISOR_EMAILS.indexOf(email.toLowerCase().trim()) !== -1) { reveal(); return; } // supervisor: tipea legajo
+        fetchEmpByEmail(email).then(function (emp) { if (emp) prefill(emp.legajo, emp.nombre); else sinSesion(); });
+      }).catch(function () { sinSesion(); });
+    }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
+    else run();
+  })();
+  </script>
 </head>
 <body>
 
-  <div id="syncBadge" title="Tocar para forzar envio" style="position:fixed;bottom:6px;left:8px;font-size:12px;font-weight:800;z-index:100;cursor:pointer;padding:4px 10px;border-radius:999px;user-select:none;background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;">v1.8.59 &#10003;</div>
+  <div id="syncBadge" title="Tocar para forzar envio" style="position:fixed;bottom:6px;left:8px;font-size:12px;font-weight:800;z-index:100;cursor:pointer;padding:4px 10px;border-radius:999px;user-select:none;background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;">v1.9.0 &#10003;</div>
 
   <!-- LEGAJO -->
   <div id="legajoScreen">
@@ -118,6 +188,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=1.8.59"></script>
+  <script src="app.js?v=1.9.0"></script>
 </body>
 </html>
