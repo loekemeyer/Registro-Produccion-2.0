@@ -288,7 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.9.1";
+  const LOCAL_VERSION = "v1.9.0";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -1061,22 +1061,11 @@ document.addEventListener("DOMContentLoaded", () => {
   function capsDe(legajo) {
     const e = empleadosMap.get(String(legajo || "").trim()) || {};
     const alimentador = e.es_alimentador === true;
-    const matriceria = e.es_matriceria === true;
-    const piedra = e.es_piedra === true;
-    // (v1.9.1) Operario de BALANCIN = el operario base: ni matriceria, ni piedra, ni
-    // alimentador. Tambien cambia la matriz de su balancin, asi que ve el boton CM
-    // por rol (sin depender de ve_cm). CM es tiempo muerto: 1er toque abre, 2do cierra.
-    const balancin = !matriceria && !piedra && !alimentador;
     return {
-      matriceria: matriceria,
-      piedra: piedra,
+      matriceria: e.es_matriceria === true,
+      piedra: e.es_piedra === true,
       alimentador: alimentador,
-      balancin: balancin,
       cm: e.ve_cm === true || alimentador,   // alimentador implica CM
-      // (v1.9.1) Visibilidad del boton CM: la capacidad de arriba MAS el rol balancin.
-      // Se mantienen separadas a proposito: `cm` es la que dispara los flujos
-      // automaticos (post-rotura, post-cajon de alimentador) y esos no cambian.
-      verCM: e.ve_cm === true || alimentador || balancin,
       pr_rd: alimentador,                     // PR + RD = rol Alimentador
       trm: e.ve_trm === true,
       tl: e.ve_tl === true,
@@ -1090,14 +1079,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (caps.matriceria) {
       if (code === "TRM") return caps.trm;
       if (code === "TL") return caps.tl;
-      if (code === "CM") return caps.verCM;
+      if (code === "CM") return caps.cm;
       if (code === "REM") return caps.rem;
       return false; // matriceria no ve los botones normales
     }
     if (code === "MOV") return !caps.piedra;
     if (code === "MOV P") return caps.piedra;
     if (code === "MM") return caps.mm;   // (v1.8.59) piedra que tambien hace matriceria
-    if (code === "CM") return caps.verCM;   // (v1.9.1) incluye al operario de balancin
+    if (code === "CM") return caps.cm;
     if (code === "PR" || code === "RD") return caps.pr_rd;
     if (code === "TRM" || code === "TL" || code === "REM") return false;
     return NORMAL_BASE.has(code);
