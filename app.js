@@ -288,7 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.9.0";
+  const LOCAL_VERSION = "v1.9.1";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -2089,7 +2089,8 @@ document.addEventListener("DOMContentLoaded", () => {
           pregunta: "Matriz 10 - Selecciona el tipo de cuchilla:",
           opciones: [
             { label: "Varilla c/ Cuchilla Recta",  matriz: "10", nombre: "Varilla c/ Cuchilla Recta (HF11)" },
-            { label: "Varilla c/ Cuchilla Curva",   matriz: "10B", nombre: "Varilla c/ Cuchilla Curva (HF15)" },
+            // (v1.9.1) La 10B no existe: la varilla curva (H15) es la matriz 174 (dueño 29/09).
+            { label: "Varilla c/ Cuchilla Curva",   matriz: "174", nombre: "Armado de Varilla Curva C/Cuchilla" },
           ],
         },
         // Matriz 28 (Corte Cuerpo Uña): el cuerpo va a Cromar (JF5) o a Pintar (JF2).
