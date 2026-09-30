@@ -74,36 +74,128 @@ document.addEventListener("DOMContentLoaded", () => {
   let _varianteYaElegida = false;
   let _lastPreviewMatriz = null;     // (v1.8.40) ultima matriz consultada en preview de E
 
-  async function cargarCatalogos() {
-    const [empRes, matRes, stockRes, balRes] = await Promise.all([
-      sb.from("Empleados").select("*"),
-      sb.from("Matrices").select("*"),
-      sb.from("UnixCajon_Stock_Registro_Prod_Cerv").select("*"),
-      sb.from("Balancines").select("*")
-    ]);
-    if (empRes.data) {
-      empRes.data.forEach(e => {
+  // (v1.9.2) Caida de Supabase del 30/09/2026: la consulta a Empleados fallo (o quedo
+  // colgada minutos), el error se ignoraba, empleadosMap quedaba vacio y la app le
+  // contestaba "Legajo no encontrado" a TODOS los operarios. Ahora:
+  //  - se arranca al instante con la ultima copia buena guardada en el telefono;
+  //  - cada consulta se corta a los 15 s en vez de esperar al servidor;
+  //  - si algo no llego se reintenta SOLO eso (20 s, 40 s, ... hasta 2 min entre intentos),
+  //    sin pisar el resto: puede tener cambios locales (ej. balancin asignado sin conexion).
+  const TABLAS_CATALOGO = {
+    empleados: "Empleados",
+    matrices: "Matrices",
+    stock: "UnixCajon_Stock_Registro_Prod_Cerv",
+    balancines: "Balancines"
+  };
+  let catalogosFaltantes = [];       // (v1.9.2) catalogos que Supabase no devolvio en la ultima carga
+  let empleadosDeRed = false;        // (v1.9.2) true cuando la lista de legajos llego de Supabase (no solo de la copia)
+  let _catalogosCargados = false;
+  let _cargaCatalogos = null;        // (v1.9.2) carga en curso (evita dos cargas a la vez)
+  let _reintentoCatalogos = null;
+  const CATALOGO_TIMEOUT_MS = 15000;
+  const CATALOGO_REINTENTO_MS = 20000;
+  const CATALOGO_REINTENTO_MAX_MS = 120000;
+  let _reintentoMs = CATALOGO_REINTENTO_MS;
+
+  function consultaCatalogo(tabla) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), CATALOGO_TIMEOUT_MS);
+    let q = sb.from(tabla).select("*");
+    if (typeof q.abortSignal === "function") q = q.abortSignal(ctl.signal);
+    return q.then(
+      r => { clearTimeout(t); return r; },
+      err => { clearTimeout(t); return { data: null, error: err }; });
+  }
+
+  function leerCatalogosCache() {
+    try { return JSON.parse(localStorage.getItem(LS_CATALOGOS) || "null"); }
+    catch { return null; }
+  }
+  function guardarCatalogosCache(c) {
+    try { localStorage.setItem(LS_CATALOGOS, JSON.stringify(c)); } catch {}
+  }
+
+  // Pisa solo los catalogos que vienen (null = no llego, se deja lo que habia).
+  function aplicarCatalogos(c) {
+    if (Array.isArray(c.empleados)) {
+      empleadosMap.clear();
+      c.empleados.forEach(e => {
         const leg = String(e.Legajo || "").trim();
         if (leg) empleadosMap.set(leg, e);
       });
     }
-    if (matRes.data) {
-      matRes.data.forEach(m => {
+    if (Array.isArray(c.matrices)) {
+      matricesMap.clear();
+      c.matrices.forEach(m => {
         const nm = String(m.N_Matriz || "").trim();
         if (nm) matricesMap.set(nm, m);
       });
     }
-    if (stockRes.data) {
-      stockRes.data.forEach(r => {
+    if (Array.isArray(c.stock)) {
+      stockMap.clear();
+      c.stock.forEach(r => {
         const nm = String(r.N_Matriz || "").trim();
         if (nm) stockMap.set(nm, r);
       });
     }
-    if (balRes.data) {
+    if (Array.isArray(c.balancines)) {
       // (v1.8.56) Num es alfanumerico (ej. 23A): orden natural (2 < 10 < 23A).
-      balancinesList = balRes.data.slice().sort((a, b) =>
+      balancinesList = c.balancines.slice().sort((a, b) =>
         String(a.Num).localeCompare(String(b.Num), "es", { numeric: true }));
     }
+  }
+
+  function cargarCatalogos() {
+    if (_cargaCatalogos) return _cargaCatalogos;
+    // Arranque: la copia local se aplica YA, sin esperar a la red.
+    const cache = leerCatalogosCache();
+    if (cache && empleadosMap.size === 0) aplicarCatalogos(cache);
+
+    // Primera carga: todo. Reintentos: solo lo que falto.
+    const claves = (_catalogosCargados && catalogosFaltantes.length)
+      ? catalogosFaltantes.slice()
+      : Object.keys(TABLAS_CATALOGO);
+
+    _cargaCatalogos = (async () => {
+      const res = await Promise.all(claves.map(k => consultaCatalogo(TABLAS_CATALOGO[k])));
+      const red = {};
+      claves.forEach((k, i) => {
+        const r = res[i];
+        red[k] = (r && !r.error && Array.isArray(r.data)) ? r.data : null;
+      });
+      aplicarCatalogos(red);
+      _catalogosCargados = true;
+      if (red.empleados) empleadosDeRed = true;
+
+      catalogosFaltantes = claves.filter(k => !red[k]);
+      if (catalogosFaltantes.length) {
+        console.warn("Catalogos sin respuesta de Supabase:", catalogosFaltantes.join(", "),
+          (res.find(r => r && r.error) || {}).error);
+      }
+
+      // La copia guarda lo ultimo bueno de cada catalogo. Sin Num_Tel ni email: la app no los usa.
+      const nueva = Object.assign({}, leerCatalogosCache() || {});
+      claves.forEach(k => {
+        if (!red[k]) return;
+        nueva[k] = (k === "empleados")
+          ? red[k].map(e => { const { Num_Tel, email, ...resto } = e; return resto; })
+          : red[k];
+      });
+      if (claves.some(k => red[k])) { nueva.ts = Date.now(); guardarCatalogosCache(nueva); }
+
+      clearTimeout(_reintentoCatalogos);
+      if (catalogosFaltantes.length) {
+        _reintentoCatalogos = setTimeout(() => {
+          cargarCatalogos().then(() => {
+            if (!legajoScreen.classList.contains("hidden")) renderSummary();
+          }).catch(() => {});
+        }, _reintentoMs);
+        _reintentoMs = Math.min(_reintentoMs * 2, CATALOGO_REINTENTO_MAX_MS);
+      } else {
+        _reintentoMs = CATALOGO_REINTENTO_MS;
+      }
+    })().finally(() => { _cargaCatalogos = null; });
+    return _cargaCatalogos;
   }
 
   // (v1.8.53) Balancines activos (para el selector de "Cambiar Matriz").
@@ -288,7 +380,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.9.1";
+  const LOCAL_VERSION = "v1.9.2";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -298,6 +390,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const LS_QUEUE = `prod_queue${APP_TAG}${VERSION}`;
   const LS_STOCK_QUEUE = `prod_stockq${APP_TAG}${VERSION}`;
   const LS_BALANCIN_QUEUE = `prod_balq${APP_TAG}${VERSION}`;   // (v1.8.53) reintento asignar matriz->balancin
+  const LS_CATALOGOS = `prod_catalogos${APP_TAG}${VERSION}`;  // (v1.9.2) ultima copia buena de Empleados/Matrices/Stock/Balancines
   const DAY_GUARD_KEY = `prod_day_guard${APP_TAG}${VERSION}`;
 
   /* ================= UUID ================= */
@@ -1592,13 +1685,38 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= NAVEGACION ================= */
-  function goToOptions() {
+  let _entrandoOpciones = false;
+  async function goToOptions() {
+    if (_entrandoOpciones) return;
     const leg = legajoKey();
     if (!leg) { alert("Ingresa el numero de legajo"); return; }
 
     if (!empleadosMap.has(leg)) {
-      alert("Legajo no encontrado. Verifica el numero.");
-      return;
+      // (v1.9.2) Si la lista todavia no llego de Supabase (solo hay copia, o nada), el
+      // legajo puede estar bien: se espera/reintenta la carga antes de contestar, y el
+      // aviso dice que es la conexion.
+      if (!empleadosDeRed) {
+        _entrandoOpciones = true;
+        const txtBtn = btnContinuar.textContent;
+        btnContinuar.disabled = true;
+        btnContinuar.textContent = "Conectando...";
+        try { await cargarCatalogos(); } catch {}
+        finally {
+          _entrandoOpciones = false;
+          btnContinuar.disabled = false;
+          btnContinuar.textContent = txtBtn;
+        }
+      }
+      if (!empleadosMap.has(leg)) {
+        if (empleadosMap.size === 0) {
+          alert("Sin conexion con la base: no se pudo cargar la lista de legajos. Espera un momento y volve a intentar.");
+        } else if (!empleadosDeRed) {
+          alert("Sin conexion con la base y el legajo no esta en la lista guardada en este equipo. Espera un momento y volve a intentar.");
+        } else {
+          alert("Legajo no encontrado. Verifica el numero.");
+        }
+        return;
+      }
     }
 
     legajoScreen.classList.add("hidden");
