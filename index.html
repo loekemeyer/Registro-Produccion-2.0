@@ -3,191 +3,67 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-  <meta name="apple-mobile-web-app-title" content="Registro" />
-  <meta name="mobile-web-app-capable" content="yes" />
   <meta name="theme-color" content="#1e40af" />
   <title>Registro Produccion</title>
-  <link rel="stylesheet" href="styles.css?v=1.9.1" />
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.json" />
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <!-- Anti-flash: la pantalla queda oculta hasta que el gate confirme sesión. -->
-  <style>#legajoScreen{visibility:hidden;}</style>
-  <!-- ===== GATE DE SESIÓN (v1.9.0) =====
-       El login es GLOBAL y vive en la raíz de Gestión (`../`). Esta app corre en
-       dos lugares y el gate se adapta solo:
-         · como sub-app (`/cervantes/` de Gestión Virgilio) → sin sesión vuelve al
-           login global, porque el operario ya entró por ahí;
-         · como repo propio (URL suelta) → no hay login "arriba", así que sin
-           sesión se cae a la pantalla de legajo de siempre (nadie queda afuera).
-       Con sesión (Google autorizada o sesión por legajo del día, compartidas: es
-       el mismo origin y el mismo proyecto Supabase) NO se vuelve a pedir el
-       legajo: se precarga y se saluda, igual que Virgilio. -->
-  <script>
-  (function cervGate() {
-    var SB_URL  = "https://hrxfctzncixxqmpfhskv.supabase.co";
-    var SB_ANON = "sb_publishable_BqpAgZH6ty-9wft10_YMhw_0rcIPuWT";
-    var SUPERVISOR_EMAILS = ["loekemeyer.n8n@gmail.com", "loekemeyer.logistica@gmail.com", "comexloekemeyer@gmail.com"];
-    var LEGAJO_KEY = "vir_legajo_auth"; // sesión por legajo compartida con la raíz
-    var EN_SUBAPP  = /\/cervantes\//.test(window.location.pathname);
-    function todayBsAs() { var d = new Date(Date.now() - 3 * 3600 * 1000); return d.toISOString().slice(0, 10); }
-    function reveal() { var s = document.getElementById("legajoScreen"); if (s) s.style.visibility = "visible"; }
-    // Sin sesión: como sub-app se vuelve al login global; suelta, pantalla de legajo.
-    function sinSesion() { if (EN_SUBAPP) window.location.replace("../"); else reveal(); }
-    // Operario ya logueado: NO re-pedimos el legajo. Lo precargamos (oculto, para
-    // el resto del código) y mostramos un saludo, igual que Virgilio.
-    function prefill(legajo, nombre) {
-      var i = document.getElementById("legajoInput");
-      if (i && legajo) {
-        i.value = legajo;
-        i.style.display = "none";
-        try { i.dispatchEvent(new Event("input", { bubbles: true })); } catch (_e) {}
-      }
-      var ls = document.getElementById("legajoScreen");
-      var h1 = ls ? ls.querySelector("h1") : null;
-      if (h1) h1.textContent = nombre ? ("Hola, " + nombre) : ("Legajo " + legajo);
-      reveal();
-    }
-    function fetchEmpByEmail(email) {
-      return fetch(SB_URL + "/rest/v1/Empleados?email=eq." + encodeURIComponent(email.toLowerCase().trim()) + "&select=Legajo,Empleado&limit=1",
-        { headers: { apikey: SB_ANON, Authorization: "Bearer " + SB_ANON } })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) {
-          if (Array.isArray(d) && d.length && d[0].Legajo != null) {
-            return { legajo: String(d[0].Legajo).trim(), nombre: String(d[0].Empleado || "").trim() };
-          }
-          return null;
-        })
-        .catch(function () { return null; });
-    }
-    function run() {
-      // 1) Sesión por legajo (sin Google), compartida con la raíz, válida el día.
-      try {
-        var raw = localStorage.getItem(LEGAJO_KEY);
-        if (raw) { var o = JSON.parse(raw); if (o && o.legajo && o.day === todayBsAs()) { prefill(o.legajo, o.nombre); return; } }
-      } catch (_e) {}
-      // 2) Sesión Google (mismo proyecto, storageKey default → compartida).
-      if (typeof supabase === "undefined") { sinSesion(); return; }
-      var sbAuth = supabase.createClient(SB_URL, SB_ANON, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false } });
-      sbAuth.auth.getSession().then(function (res) {
-        var s = res && res.data ? res.data.session : null;
-        if (!s || !s.user || !s.user.email) { sinSesion(); return; }
-        var email = s.user.email;
-        if (SUPERVISOR_EMAILS.indexOf(email.toLowerCase().trim()) !== -1) { reveal(); return; } // supervisor: tipea legajo
-        fetchEmpByEmail(email).then(function (emp) { if (emp) prefill(emp.legajo, emp.nombre); else sinSesion(); });
-      }).catch(function () { sinSesion(); });
-    }
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
-    else run();
-  })();
-  </script>
+  <!-- (v1.10.0) Registro Producción 2.0 quedó retirado: se usa Registro Producción 3.0
+       [Luis, 16/10/2026]. Esta pantalla reemplaza la de legajo:
+         · sin registros en cola → cierra la sesión de RP2 de este celular (borra el
+           estado del día por legajo) y muestra el botón a RP3;
+         · con registros en cola → NO borra nada y manda primero a app.html (la app
+           vieja) para que los envíe; cuando la cola queda vacía vuelve acá.
+       No se toca `vir_legajo_auth` ni la sesión de Supabase: el origin
+       loekemeyer.github.io es compartido y las usan Gestión Virgilio y RP3. -->
+  <style>
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+           font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f8fafc; color: #0f172a; }
+    main { max-width: 420px; padding: 24px 16px; text-align: center; }
+    h1 { font-size: 22px; margin: 0 0 12px; }
+    p { font-size: 16px; line-height: 1.4; margin: 0 0 20px; color: #334155; }
+    .btn { display: block; padding: 18px 16px; border-radius: 12px; font-size: 20px; font-weight: 800;
+           text-decoration: none; color: #fff; background: #1e40af; }
+    .btn.warn { background: #b45309; }
+    .hidden { display: none; }
+    small { display: block; margin-top: 16px; color: #64748b; font-size: 12px; }
+  </style>
 </head>
 <body>
-
-  <div id="syncBadge" title="Tocar para forzar envio" style="position:fixed;bottom:6px;left:8px;font-size:12px;font-weight:800;z-index:100;cursor:pointer;padding:4px 10px;border-radius:999px;user-select:none;background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;">v1.9.1 &#10003;</div>
-
-  <!-- LEGAJO -->
-  <div id="legajoScreen">
-    <button id="btnHistDias" style="position:fixed;top:12px;right:12px;width:44px;height:44px;border-radius:50%;border:2px solid #cbd5e1;background:#f8fafc;font-size:20px;cursor:pointer;z-index:100;display:flex;align-items:center;justify-content:center;" title="Historial dias anteriores">📅</button>
-    <h1>Ingresa tu numero de Operario</h1>
-    <input id="legajoInput" type="number" inputmode="numeric">
-    <button id="btnContinuar" class="primary-btn">Continuar</button>
-
-    <div class="history-wrap">
-      <div class="history-title">Resumen del dia (en este dispositivo)</div>
-      <div id="daySummary" class="history-empty">Ingresa tu legajo para ver el resumen</div>
+  <main>
+    <div id="vaRp3">
+      <h1>Registro Producción ahora es la versión 3.0</h1>
+      <p>Esta app ya no se usa. Tocá el botón para entrar por la nueva.</p>
+      <a class="btn" href="https://loekemeyer.github.io/Registro-Produccion-3.0/">Entrar a Registro Producción 3.0</a>
     </div>
-    <div id="pendingSection" class="pending-section hidden">
-      <div class="pending-title">Pendientes en cola (este dispositivo)</div>
-      <div id="pendingList" class="pending-list"></div>
+    <div id="hayCola" class="hidden">
+      <h1>Hay registros sin enviar en este celular</h1>
+      <p><b id="nCola">0</b> registro(s) de la app vieja todavía no llegaron. Abrila para que se envíen; cuando termine vuelve sola a esta pantalla.</p>
+      <a class="btn warn" href="app.html">Enviar pendientes</a>
     </div>
-
-  </div>
-
-  <!-- OPCIONES -->
-  <div id="optionsScreen" class="hidden">
-    <button id="btnTerminarDia" style="position:fixed;top:10px;right:10px;width:auto;padding:8px 14px;font-size:14px;font-weight:bold;background:#dc2626;color:#fff;border:2px solid #991b1b;border-radius:8px;cursor:pointer;margin:0;line-height:1;z-index:50;">Terminar Día</button>
-    <div class="top-bar">
-      <div id="btnBackTop" class="back-top">&larr;</div>
-      <div id="btnBackLabel" class="back-label">Volver a pantalla inicial</div>
-    </div>
-
-    <div class="row row-2" id="row1"></div>
-    <div class="row row-5" id="row2"></div>
-    <div class="row row-5" id="row3"></div>
-    <div class="row row-4" id="row4"></div>
-
-    <div id="selectedArea" class="hidden">
-      <div class="selected-container">
-        <div id="btnResetSelection" class="back-arrow">&larr;</div>
-        <div id="selectedBox" class="selected-box"></div>
-        <div id="selectedDesc" class="selected-desc"></div>
-      </div>
-
-      <div id="inputArea" class="hidden">
-        <div id="inputLabel" class="label"></div>
-        <input id="textInput" class="text-input" autocomplete="off">
-      </div>
-
-      <div id="matrizInfo" class="matriz-info hidden"></div>
-
-      <div id="cajonCompletoWrap" class="hidden" style="margin:8px 0;padding:10px;border-radius:8px;background:#fff7ed;border:1px solid #fed7aa;">
-        <label style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:#9a3412;cursor:pointer;">
-          <input type="checkbox" id="cajonCompletoChk" style="width:20px;height:20px;">
-          Cerrar caj&oacute;n como <b>completo</b> (no hay m&aacute;s material para esta matriz)
-        </label>
-      </div>
-
-      <button id="btnEnviar" class="primary-btn">Enviar</button>
-      <div id="error" class="error"></div>
-    </div>
-  </div>
-
-  <!-- MODAL EDICION -->
-  <div id="editModal" class="edit-modal hidden">
-    <div class="edit-modal-box">
-      <div class="edit-modal-header">Editar registro</div>
-      <div class="edit-modal-body">
-        <div class="edit-field">
-          <label>Codigo</label>
-          <select id="editCode"></select>
-        </div>
-        <div class="edit-field" id="editTextoWrap">
-          <label>Valor</label>
-          <input type="text" id="editTexto" />
-        </div>
-        <div class="edit-field">
-          <label>Evento</label>
-          <input type="text" id="editTs" disabled />
-        </div>
-        <div class="edit-field">
-          <label>Estado</label>
-          <input type="text" id="editStatus" disabled />
-        </div>
-      </div>
-      <div class="edit-modal-footer">
-        <button class="edit-btn edit-btn-cancel" id="editCancel">Cancelar</button>
-        <button class="edit-btn edit-btn-save" id="editSave">Guardar</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- MODAL TERMINAR DIA -->
-  <div id="terminarDiaModal" class="td-modal hidden">
-    <div class="td-modal-card">
-      <div class="td-modal-header">
-        <span class="td-modal-title">Terminar día</span>
-        <button class="td-modal-close" id="btnCancelTD">Cancelar</button>
-      </div>
-      <div class="td-modal-body" id="terminarDiaContent"></div>
-      <div class="td-modal-footer">
-        <button id="btnConfirmTD" class="td-confirm-btn">Sí, terminar día</button>
-      </div>
-    </div>
-  </div>
-
-  <script src="app.js?v=1.9.1"></script>
+    <small>v1.10.0</small>
+  </main>
+  <script>
+  (function () {
+    var TAG = "_Cervantes_v2_supa";
+    var COLAS = ["prod_queue" + TAG, "prod_stockq" + TAG, "prod_balq" + TAG];
+    var n = 0;
+    for (var i = 0; i < COLAS.length; i++) {
+      try { var a = JSON.parse(localStorage.getItem(COLAS[i]) || "[]"); if (Array.isArray(a)) n += a.length; } catch (_e) {}
+    }
+    if (n > 0) {
+      document.getElementById("nCola").textContent = String(n);
+      document.getElementById("hayCola").classList.remove("hidden");
+      document.getElementById("vaRp3").classList.add("hidden");
+      return;
+    }
+    // Sin cola: deslogueo de RP2 = borrar el estado del día por legajo y el guard del día.
+    try {
+      for (var k = localStorage.length - 1; k >= 0; k--) {
+        var key = localStorage.key(k);
+        if (key && (key.indexOf("prod_state" + TAG) === 0 || key === "prod_day_guard" + TAG)) localStorage.removeItem(key);
+      }
+    } catch (_e) {}
+  })();
+  </script>
 </body>
 </html>

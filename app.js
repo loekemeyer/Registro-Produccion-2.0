@@ -139,15 +139,20 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  let balFlushing = false; // (v1.10.0) ahora corre cada 3 s: que no se pisen dos pasadas
   async function flushBalancinQueue() {
+    if (balFlushing) return;
     const q = readBalancinQueue();
     if (!q.length) return;
+    balFlushing = true;
     const restantes = [];
-    for (const call of q) {
-      try { const { error } = await sb.rpc("asignar_matriz_balancin", call); if (error) throw error; }
-      catch { restantes.push(call); }
-    }
-    writeBalancinQueue(restantes);
+    try {
+      for (const call of q) {
+        try { const { error } = await sb.rpc("asignar_matriz_balancin", call); if (error) throw error; }
+        catch { restantes.push(call); }
+      }
+      writeBalancinQueue(restantes);
+    } finally { balFlushing = false; }
   }
 
   /* ================= STOCK DE CAJON (UnixCajon) — v1.8.40 ================= */
@@ -288,7 +293,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   /* ================= VERSION (unica fuente de verdad) ================= */
-  const LOCAL_VERSION = "v1.9.1";
+  const LOCAL_VERSION = "v1.10.0";
 
   /* ================= KEYS STORAGE ================= */
   const APP_TAG = "_Cervantes";
@@ -3344,7 +3349,7 @@ document.addEventListener("DOMContentLoaded", () => {
     while (Date.now() < end && readQueue().length) await flushQueue();
     flushStockQueue();
   });
-  setInterval(() => { flushQueue(); flushStockQueue(); }, 3000);
+  setInterval(() => { flushQueue(); flushStockQueue(); flushBalancinQueue(); }, 3000); // (v1.10.0) + balancines: RP2 retirado, la cola tiene que vaciarse sola
 
   /* ================= LOG SW (debug visible en celu) ================= */
   const SW_LOG_KEY = "sw_log_v1";
